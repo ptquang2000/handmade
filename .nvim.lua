@@ -1,8 +1,6 @@
 vim.keymap.set("n", "<leader>m", function()
   vim.fn.mkdir("build", "p")
-  local debug = " -g -C opt-level=3"
-  local output = " --out-dir build src/unix_handmade.rs"
-  vim.opt_local.makeprg = "rustc" .. debug .. output
+  vim.opt_local.makeprg = "sh build.sh"
 
   local start = vim.uv.now()
   vim.cmd("silent make!")
