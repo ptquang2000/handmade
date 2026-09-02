@@ -1,5 +1,3 @@
-type ListenerImplementation = unsafe extern "C" fn();
-
 struct ClientState {
     compositor: *mut wl::wl_compositor,
     shm: *mut wl::wl_shm,
@@ -8,6 +6,9 @@ struct ClientState {
     window_manager: *mut xdg::xdg_wm_base,
     window: *mut xdg::xdg_surface,
     toplevel: *mut xdg::xdg_toplevel,
+
+    running: bool,
+    bitmap: Buffer,
 }
 
 impl Default for ClientState {
@@ -20,12 +21,37 @@ impl Default for ClientState {
             window_manager: std::ptr::null_mut(),
             window: std::ptr::null_mut(),
             toplevel: std::ptr::null_mut(),
+
+            running: true,
+            bitmap: Buffer {
+                addr: std::ptr::null_mut(),
+                fd: 0,
+                size: 0,
+            },
         }
     }
 }
 
-mod posix {
-    pub fn allocate_memory(name: &str, size: usize) -> (i32, *mut ()) {
+pub struct Buffer {
+    addr: *mut u32,
+    fd: i32,
+    size: usize,
+}
+
+impl Default for Buffer {
+    fn default() -> Self {
+        Self {
+            addr: std::ptr::null_mut(),
+            fd: -1,
+            size: 0,
+        }
+    }
+}
+
+mod unix {
+    use Buffer;
+
+    pub fn allocate_memory(name: &str, size: i32) -> Buffer {
         const MFD_CLOEXEC: u32 = 0x0001;
         const PROT_READ: i32 = 0x1;
         const PROT_WRITE: i32 = 0x2;
@@ -41,12 +67,12 @@ mod posix {
         buf[..name.len()].copy_from_slice(&name.as_bytes());
         let fd = unsafe { memfd_create(buf.as_ptr() as *const i8, MFD_CLOEXEC) };
         assert!(fd != -1, "memfd_create");
-        let result = unsafe { ftruncate(fd, size as i32) };
+        let result = unsafe { ftruncate(fd, size) };
         assert!(result != -1, "ftruncate");
         let addr = unsafe {
             mmap(
                 std::ptr::null_mut(),
-                size,
+                size as usize,
                 PROT_READ | PROT_WRITE,
                 MAP_SHARED,
                 fd,
@@ -54,15 +80,23 @@ mod posix {
             ) as *mut ()
         };
         assert!(addr as i32 != MAP_FAILED, "mmap");
-        (fd, addr)
+        Buffer {
+            addr: addr as *mut u32,
+            fd: fd,
+            size: size as usize,
+        }
+    }
+
+    pub fn release_memory(data: &mut Buffer) {
+        unsafe { close(data.fd) };
+        unsafe { munmap(data.addr as *mut std::ffi::c_void, data.size as usize) };
+        *data = Buffer::default();
     }
 
     #[link(name = "c")]
     unsafe extern "C" {
-        pub fn close(fd: std::ffi::c_int) -> std::ffi::c_int;
-        pub fn munmap(addr: *mut std::ffi::c_void, len: usize) -> std::ffi::c_int;
-
         fn memfd_create(name: *const std::ffi::c_char, oflag: std::ffi::c_uint) -> std::ffi::c_int;
+        fn close(fd: std::ffi::c_int) -> std::ffi::c_int;
         fn ftruncate(fd: std::ffi::c_int, length: std::ffi::c_int) -> std::ffi::c_int;
         fn mmap(
             addr: *const std::ffi::c_void,
@@ -72,10 +106,13 @@ mod posix {
             fd: std::ffi::c_int,
             offset: std::ffi::c_int,
         ) -> *mut std::ffi::c_void;
+        fn munmap(addr: *mut std::ffi::c_void, len: usize) -> std::ffi::c_int;
     }
 }
 
 mod wl {
+    pub type ListenerImplementation = unsafe extern "C" fn();
+
     const WL_DISPLAY_GET_REGISTRY: u32 = 1;
 
     const WL_COMPOSITOR_CREATE_SURFACE: u32 = 0;
@@ -304,7 +341,7 @@ mod wl {
         }
     }
 
-    use {xdg, ClientState, ListenerImplementation};
+    use {xdg, ClientState};
 
     #[link(name = "wayland-client")]
     unsafe extern "C" {
@@ -451,7 +488,7 @@ mod wl {
     ) {
         let interface = std::ffi::CStr::from_ptr(interface).to_str().unwrap_or("");
 
-        let state = data.cast::<::ClientState>();
+        let state = data.cast::<ClientState>();
         if interface
             == std::ffi::CStr::from_ptr(wl_compositor_interface.name)
                 .to_str()
@@ -535,7 +572,7 @@ mod xdg {
         unsafe {
             wl::wl_proxy_add_listener(
                 wm as *mut wl::wl_proxy,
-                std::ptr::addr_of_mut!(wm_listener).cast::<ListenerImplementation>(),
+                std::ptr::addr_of_mut!(wm_listener).cast::<wl::ListenerImplementation>(),
                 state as *mut std::ffi::c_void,
             );
         }
@@ -545,7 +582,7 @@ mod xdg {
         unsafe {
             wl::wl_proxy_add_listener(
                 surface as *mut wl::wl_proxy,
-                std::ptr::addr_of_mut!(surface_listener).cast::<ListenerImplementation>(),
+                std::ptr::addr_of_mut!(surface_listener).cast::<wl::ListenerImplementation>(),
                 state as *mut std::ffi::c_void,
             );
         }
@@ -614,13 +651,28 @@ mod xdg {
         }
     }
 
-    use {posix, wl, ClientState, ListenerImplementation};
+    pub fn toplevel_add_listener(toplevel: *mut xdg_toplevel, state: *mut ClientState) {
+        unsafe {
+            wl::wl_proxy_add_listener(
+                toplevel as *mut wl::wl_proxy,
+                std::ptr::addr_of_mut!(toplevel_listener).cast::<wl::ListenerImplementation>(),
+                state as *mut std::ffi::c_void,
+            );
+        }
+    }
+
+    use {unix, wl, ClientState};
 
     #[no_mangle]
     pub static mut wm_listener: xdg_wm_base_listener = xdg_wm_base_listener { ping: wm_ping };
     #[no_mangle]
     pub static mut surface_listener: xdg_surface_listener = xdg_surface_listener {
         configure: surface_configure,
+    };
+    #[no_mangle]
+    pub static mut toplevel_listener: xdg_toplevel_listener = xdg_toplevel_listener {
+        configure: toplevel_configure,
+        close: toplevel_close,
     };
 
     #[link(name = "xdg-shell-protocol", kind = "static")]
@@ -652,10 +704,23 @@ mod xdg {
     pub struct xdg_surface_listener {
         configure: XDGSurfaceConfigure,
     }
+    #[repr(C)]
+    pub struct xdg_toplevel_listener {
+        configure: XDGToplevelConfigure,
+        close: XDGToplevelClose,
+    }
     type XDGWMBasePing =
         unsafe extern "C" fn(*mut std::ffi::c_void, *mut xdg_wm_base, std::ffi::c_uint);
     type XDGSurfaceConfigure =
         unsafe extern "C" fn(*mut std::ffi::c_void, *mut xdg_surface, std::ffi::c_uint);
+    type XDGToplevelConfigure = unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut xdg_toplevel,
+        std::ffi::c_int,
+        std::ffi::c_int,
+        *mut wl::wl_array,
+    );
+    type XDGToplevelClose = unsafe extern "C" fn(*mut std::ffi::c_void, *mut xdg_toplevel);
 
     unsafe extern "C" fn wm_ping(
         _data: *mut std::ffi::c_void,
@@ -665,48 +730,53 @@ mod xdg {
         wm_pong(xdg_wm_base, serial);
     }
 
-    static mut PAINT_COUNT: i32 = 0;
     unsafe extern "C" fn surface_configure(
         data: *mut std::ffi::c_void,
         surface: *mut xdg_surface,
         serial: std::ffi::c_uint,
     ) {
-        const WIDTH: i32 = 640;
-        const HEIGHT: i32 = 480;
-        const STRIDE: i32 = WIDTH * 4;
-        const SIZE: i32 = HEIGHT * STRIDE;
-
-        let state = data.cast::<::ClientState>();
+        let state = data.cast::<ClientState>();
         surface_ack_configure(surface, serial);
 
-        let (fd, ptr) = posix::allocate_memory("handmade_hero", SIZE as usize);
-        let pool = wl::shm_create_pool((*state).shm, fd, SIZE);
+        wl::surface_commit((*state).surface);
+    }
+
+    unsafe extern "C" fn toplevel_configure(
+        data: *mut std::ffi::c_void,
+        _toplevel: *mut xdg_toplevel,
+        width: std::ffi::c_int,
+        height: std::ffi::c_int,
+        _states: *mut wl::wl_array,
+    ) {
+        let state = data.cast::<ClientState>();
+        let stride: i32 = width * std::mem::size_of_val(&width) as i32;
+        (*state).bitmap = unix::allocate_memory("handmade_hero", height * stride);
+
+        let pool = wl::shm_create_pool(
+            (*state).shm,
+            (*state).bitmap.fd,
+            (*state).bitmap.size as i32,
+        );
         let buffer = wl::shm_pool_create_buffer(
             pool,
             0,
-            WIDTH,
-            HEIGHT,
-            STRIDE,
+            width,
+            height,
+            stride,
             wl::SHMFormat::XRGB8888 as u32,
         );
         wl::shm_pool_destroy(pool);
-        posix::close(fd);
 
-        let paint_count = PAINT_COUNT;
-        let color = match PAINT_COUNT {
-            0 => 0xFFFFFFFF,
-            _ => 0xFF000000,
-        };
-        let slice = std::slice::from_raw_parts_mut(ptr as *mut u32, (SIZE / 4) as usize);
-        slice.fill(color);
-        PAINT_COUNT = (paint_count + 1) % 2;
-
-        posix::munmap(ptr as *mut std::ffi::c_void, SIZE as usize);
+        unix::release_memory(&mut (*state).bitmap);
         wl::buffer_add_listener(buffer);
 
         wl::surface_attach((*state).surface, buffer, 0, 0);
-        wl::surface_damage_buffer((*state).surface, 0, 0, WIDTH, HEIGHT);
-        wl::surface_commit((*state).surface);
+        wl::surface_damage_buffer((*state).surface, 0, 0, width, height);
+    }
+
+    unsafe extern "C" fn toplevel_close(data: *mut std::ffi::c_void, _toplevel: *mut xdg_toplevel) {
+        let state = data.cast::<ClientState>();
+        (*state).running = false;
     }
 
     fn wm_pong(wm: *mut xdg_wm_base, serial: std::ffi::c_uint) {
@@ -752,11 +822,17 @@ fn main() {
         state.surface = wl::compositor_create_surface(state.compositor);
         state.window = xdg::wm_get_xdg_surface(state.window_manager, state.surface);
         xdg::surface_add_listener(state.window, &mut state);
+
         state.toplevel = xdg::surface_get_toplevel(state.window);
         xdg::toplevel_set_title(state.toplevel, "Handmade Hero");
+        xdg::toplevel_add_listener(state.toplevel, &mut state);
 
         wl::surface_commit(state.surface);
-        while wl::display_dispatch(display) != -1 {}
+        while wl::display_dispatch(display) != -1 {
+            if !state.running {
+                break;
+            }
+        }
         wl::display_disconnect(display)
     } else {
         panic!("display_connect.")
