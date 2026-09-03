@@ -1,3 +1,5 @@
+const BYTES_PER_PIXEL: i32 = std::mem::size_of::<i32>() as i32;
+
 struct ClientState {
     compositor: *mut wl::wl_compositor,
     shm: *mut wl::wl_shm,
@@ -8,7 +10,11 @@ struct ClientState {
     toplevel: *mut xdg::xdg_toplevel,
 
     running: bool,
-    bitmap: Buffer,
+
+    bitmap_memory: Memory,
+    bitmap_buffer: *mut wl::wl_buffer,
+    bitmap_width: i32,
+    bitmap_height: i32,
 }
 
 impl Default for ClientState {
@@ -23,22 +29,26 @@ impl Default for ClientState {
             toplevel: std::ptr::null_mut(),
 
             running: true,
-            bitmap: Buffer {
+
+            bitmap_memory: Memory {
                 addr: std::ptr::null_mut(),
                 fd: 0,
                 size: 0,
             },
+            bitmap_buffer: std::ptr::null_mut(),
+            bitmap_width: 0,
+            bitmap_height: 0,
         }
     }
 }
 
-pub struct Buffer {
-    addr: *mut u32,
+pub struct Memory {
+    addr: *mut u8,
     fd: i32,
     size: usize,
 }
 
-impl Default for Buffer {
+impl Default for Memory {
     fn default() -> Self {
         Self {
             addr: std::ptr::null_mut(),
@@ -48,10 +58,30 @@ impl Default for Buffer {
     }
 }
 
-mod unix {
-    use Buffer;
+unsafe fn render_weird_gradient(
+    x_offset: i32,
+    y_offset: i32,
+    bitmap_width: i32,
+    bitmap_height: i32,
+    bitmap_addr: *mut u8,
+) {
+    let pitch = bitmap_width * BYTES_PER_PIXEL;
+    let mut row = bitmap_addr;
+    for y in 0..bitmap_height {
+        let mut pixel = row as *mut u32;
+        for x in 0..bitmap_width {
+            let color = (((y + y_offset) & 0xFF) << 8) | ((x + x_offset) & 0xFF);
+            *pixel = color as u32;
+            pixel = pixel.wrapping_add(1);
+        }
+        row = row.wrapping_add(pitch as usize);
+    }
+}
 
-    pub fn allocate_memory(name: &str, size: i32) -> Buffer {
+mod unix {
+    use *;
+
+    pub fn allocate_memory(name: &str, size: i32) -> Memory {
         const MFD_CLOEXEC: u32 = 0x0001;
         const PROT_READ: i32 = 0x1;
         const PROT_WRITE: i32 = 0x2;
@@ -80,17 +110,30 @@ mod unix {
             ) as *mut ()
         };
         assert!(addr as i32 != MAP_FAILED, "mmap");
-        Buffer {
-            addr: addr as *mut u32,
+        Memory {
+            addr: addr as *mut u8,
             fd: fd,
             size: size as usize,
         }
     }
 
-    pub fn release_memory(data: &mut Buffer) {
+    pub fn release_memory(data: &mut Memory) {
         unsafe { close(data.fd) };
         unsafe { munmap(data.addr as *mut std::ffi::c_void, data.size as usize) };
-        *data = Buffer::default();
+        *data = Memory::default();
+    }
+
+    pub fn update_window(
+        surface: *mut wl::wl_surface,
+        buffer: *mut wl::wl_buffer,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) {
+        wl::surface_attach(surface, buffer, x, y);
+        wl::surface_damage_buffer(surface, x, y, width, height);
+        wl::surface_commit(surface);
     }
 
     #[link(name = "c")]
@@ -111,6 +154,8 @@ mod unix {
 }
 
 mod wl {
+    use *;
+
     pub type ListenerImplementation = unsafe extern "C" fn();
 
     const WL_DISPLAY_GET_REGISTRY: u32 = 1;
@@ -161,8 +206,18 @@ mod wl {
         unsafe { wl_display_disconnect(display) }
     }
 
+    #[allow(dead_code)]
     pub fn display_dispatch(display: *mut wl_display) -> i32 {
         unsafe { wl_display_dispatch(display) }
+    }
+
+    pub fn display_dispatch_pending(display: *mut wl_display) -> i32 {
+        unsafe {
+            wl_display_prepare_read(display);
+            wl_display_flush(display);
+            wl_display_read_events(display);
+            wl_display_dispatch_pending(display)
+        }
     }
 
     pub fn display_roundtrip(display: *mut wl_display) -> i32 {
@@ -194,6 +249,7 @@ mod wl {
         }
     }
 
+    #[allow(dead_code)]
     pub fn buffer_add_listener(buffer: *mut wl_buffer) {
         unsafe {
             wl_proxy_add_listener(
@@ -341,8 +397,6 @@ mod wl {
         }
     }
 
-    use {xdg, ClientState};
-
     #[link(name = "wayland-client")]
     unsafe extern "C" {
         static wl_registry_interface: wl_interface;
@@ -371,6 +425,12 @@ mod wl {
         fn wl_display_connect(name: *const std::ffi::c_char) -> *mut wl_display;
         fn wl_display_disconnect(display: *mut wl_display);
         fn wl_display_dispatch(display: *mut wl_display) -> std::ffi::c_int;
+        fn wl_display_dispatch_pending(display: *mut wl_display) -> std::ffi::c_int;
+        fn wl_display_flush(display: *mut wl_display) -> std::ffi::c_int;
+        fn wl_display_read_events(display: *mut wl_display) -> std::ffi::c_int;
+        fn wl_display_prepare_read(display: *mut wl_display) -> std::ffi::c_int;
+        #[allow(dead_code)]
+        fn wl_display_cancel_read(display: *mut wl_display) -> std::ffi::c_int;
     }
 
     #[repr(C)]
@@ -488,29 +548,29 @@ mod wl {
     ) {
         let interface = std::ffi::CStr::from_ptr(interface).to_str().unwrap_or("");
 
-        let state = data.cast::<ClientState>();
+        let state = &mut *data.cast::<ClientState>();
         if interface
             == std::ffi::CStr::from_ptr(wl_compositor_interface.name)
                 .to_str()
                 .unwrap()
         {
-            (*state).compositor = registry_bind(registry, name, &wl_compositor_interface, version)
+            state.compositor = registry_bind(registry, name, &wl_compositor_interface, version)
                 as *mut wl_compositor;
         } else if interface
             == std::ffi::CStr::from_ptr(wl_shm_interface.name)
                 .to_str()
                 .unwrap()
         {
-            (*state).shm = registry_bind(registry, name, &wl_shm_interface, version) as *mut wl_shm;
+            state.shm = registry_bind(registry, name, &wl_shm_interface, version) as *mut wl_shm;
         } else if interface
             == std::ffi::CStr::from_ptr(xdg::xdg_wm_base_interface.name)
                 .to_str()
                 .unwrap()
         {
-            (*state).window_manager =
+            state.window_manager =
                 registry_bind(registry, name, &xdg::xdg_wm_base_interface, version)
                     as *mut xdg::xdg_wm_base;
-            xdg::wm_add_listener((*state).window_manager, state);
+            xdg::wm_add_listener(state.window_manager, data.cast::<ClientState>());
         }
     }
 
@@ -521,7 +581,7 @@ mod wl {
     ) {
     }
 
-    unsafe extern "C" fn buffer_release(_data: *mut std::ffi::c_void, buffer: *mut wl_buffer) {
+    pub unsafe extern "C" fn buffer_release(_data: *mut std::ffi::c_void, buffer: *mut wl_buffer) {
         let proxy = buffer as *mut wl_proxy;
         unsafe {
             wl_proxy_marshal_array_flags(
@@ -560,6 +620,8 @@ mod wl {
 }
 
 mod xdg {
+    use *;
+
     const XDG_WM_BASE_GET_XDG_SURFACE: u32 = 2;
     const XDG_WM_BASE_PONG: u32 = 3;
 
@@ -661,8 +723,6 @@ mod xdg {
         }
     }
 
-    use {unix, wl, ClientState};
-
     #[no_mangle]
     pub static mut wm_listener: xdg_wm_base_listener = xdg_wm_base_listener { ping: wm_ping };
     #[no_mangle]
@@ -735,10 +795,8 @@ mod xdg {
         surface: *mut xdg_surface,
         serial: std::ffi::c_uint,
     ) {
-        let state = data.cast::<ClientState>();
+        let _state = &*data.cast::<ClientState>();
         surface_ack_configure(surface, serial);
-
-        wl::surface_commit((*state).surface);
     }
 
     unsafe extern "C" fn toplevel_configure(
@@ -748,35 +806,37 @@ mod xdg {
         height: std::ffi::c_int,
         _states: *mut wl::wl_array,
     ) {
-        let state = data.cast::<ClientState>();
-        let stride: i32 = width * std::mem::size_of_val(&width) as i32;
-        (*state).bitmap = unix::allocate_memory("handmade_hero", height * stride);
+        let state = &mut *data.cast::<ClientState>();
+        state.bitmap_width = width;
+        state.bitmap_height = height;
 
-        let pool = wl::shm_create_pool(
-            (*state).shm,
-            (*state).bitmap.fd,
-            (*state).bitmap.size as i32,
-        );
-        let buffer = wl::shm_pool_create_buffer(
+        let bitmap_size = width * height * BYTES_PER_PIXEL;
+        let pitch = width * BYTES_PER_PIXEL;
+
+        if !state.bitmap_memory.addr.is_null() {
+            wl::buffer_release(std::ptr::null_mut(), state.bitmap_buffer);
+            unix::release_memory(&mut state.bitmap_memory);
+        }
+
+        state.bitmap_memory = unix::allocate_memory("handmade_hero", bitmap_size);
+        let pool = wl::shm_create_pool(state.shm, state.bitmap_memory.fd, bitmap_size);
+        state.bitmap_buffer = wl::shm_pool_create_buffer(
             pool,
             0,
-            width,
-            height,
-            stride,
+            state.bitmap_width,
+            state.bitmap_height,
+            pitch,
             wl::SHMFormat::XRGB8888 as u32,
         );
         wl::shm_pool_destroy(pool);
 
-        unix::release_memory(&mut (*state).bitmap);
-        wl::buffer_add_listener(buffer);
-
-        wl::surface_attach((*state).surface, buffer, 0, 0);
-        wl::surface_damage_buffer((*state).surface, 0, 0, width, height);
+        // NOTE: unable to attach bitmap buffer once we release it.
+        // wl::buffer_add_listener(state.bitmap_buffer);
     }
 
     unsafe extern "C" fn toplevel_close(data: *mut std::ffi::c_void, _toplevel: *mut xdg_toplevel) {
-        let state = data.cast::<ClientState>();
-        (*state).running = false;
+        let state = &mut *data.cast::<ClientState>();
+        state.running = false;
     }
 
     fn wm_pong(wm: *mut xdg_wm_base, serial: std::ffi::c_uint) {
@@ -828,13 +888,36 @@ fn main() {
         xdg::toplevel_add_listener(state.toplevel, &mut state);
 
         wl::surface_commit(state.surface);
-        while wl::display_dispatch(display) != -1 {
-            if !state.running {
-                break;
+
+        let mut x_offset = 0;
+        let y_offset = 0;
+        while state.running {
+            if wl::display_dispatch_pending(display) != -1 {
+                unsafe {
+                    render_weird_gradient(
+                        x_offset,
+                        y_offset,
+                        state.bitmap_width,
+                        state.bitmap_height,
+                        state.bitmap_memory.addr,
+                    )
+                };
+                x_offset += 1;
+
+                unix::update_window(
+                    state.surface,
+                    state.bitmap_buffer,
+                    0,
+                    0,
+                    state.bitmap_width,
+                    state.bitmap_height,
+                );
+            } else {
+                state.running = false;
             }
         }
-        wl::display_disconnect(display)
+        wl::display_disconnect(display);
     } else {
-        panic!("display_connect.")
+        panic!("display_connect.");
     }
 }
