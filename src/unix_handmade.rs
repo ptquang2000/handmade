@@ -19,9 +19,25 @@ fn render_weird_gradient(x_offset: i32, y_offset: i32, buffer: &mut unix::Offscr
 mod unix {
     use *;
 
+    pub enum KeyCode {
+        ESC = 1,
+        Q = 16,
+        W = 17,
+        E = 18,
+        A = 30,
+        S = 31,
+        D = 32,
+        SPACE = 57,
+        UP = 103,
+        LEFT = 105,
+        RIGHT = 106,
+        DOWN = 108,
+    }
+
     pub enum EventType {
         None,
         Close,
+        Keyboard(u32, u32),
     }
 
     pub struct OffscreenBuffer {
@@ -193,6 +209,9 @@ mod wl {
         pub surface: *mut wl::wl_surface,
         pub buffer: *mut wl::wl_buffer,
 
+        pub seat: *mut wl::wl_seat,
+        pub keyboard: *mut wl::wl_keyboard,
+
         pub window_manager: *mut xdg::xdg_wm_base,
         pub window: *mut xdg::xdg_surface,
         pub toplevel: *mut xdg::xdg_toplevel,
@@ -224,8 +243,18 @@ mod wl {
 
     const WL_MARSHAL_FLAG_DESTROY: u32 = 1;
 
+    const WL_SEAT_GET_KEYBOARD: u32 = 1;
+
+    const WL_KEYBOARD_RELEASE: u32 = 0;
+
     pub enum SHMFormat {
         XRGB8888 = 1,
+    }
+
+    enum SeatCapability {
+        // POINTER = 1,
+        KEYBOARD = 2,
+        // TOUCH = 4,
     }
 
     pub fn display_connect(sock_name: &str) -> Option<*mut wl_display> {
@@ -491,6 +520,8 @@ mod wl {
         static wl_shm_interface: wl_interface;
         static wl_shm_pool_interface: wl_interface;
         static wl_buffer_interface: wl_interface;
+        static wl_seat_interface: wl_interface;
+        static wl_keyboard_interface: wl_interface;
 
         pub fn wl_proxy_get_version(proxy: *mut wl_proxy) -> std::ffi::c_uint;
         pub fn wl_proxy_marshal_array_flags(
@@ -581,6 +612,16 @@ mod wl {
         _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
     }
     #[repr(C)]
+    pub struct wl_seat {
+        _data: (),
+        _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    }
+    #[repr(C)]
+    pub struct wl_keyboard {
+        _data: (),
+        _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    }
+    #[repr(C)]
     pub struct wl_array {
         size: usize,
         alloc: usize,
@@ -606,6 +647,20 @@ mod wl {
     struct wl_buffer_listener {
         release: BufferRelease,
     }
+    #[repr(C)]
+    struct wl_seat_listener {
+        capabilities: SeatCapabilities,
+        name: SeatName,
+    }
+    #[repr(C)]
+    struct wl_keyboard_listener {
+        keymap: KeyboardKeymap,
+        enter: KeyboardEnter,
+        leave: KeyboardLeave,
+        key: KeyboardKey,
+        modifiers: KeyboardModifiers,
+        repeat_info: KeyboardRepeatInfo,
+    }
     type RegistryGlobal = unsafe extern "C" fn(
         *mut std::ffi::c_void,
         *mut wl_registry,
@@ -616,6 +671,53 @@ mod wl {
     type RegistryGlobalRemove =
         unsafe extern "C" fn(*mut std::ffi::c_void, *mut wl_registry, std::ffi::c_uint);
     type BufferRelease = unsafe extern "C" fn(*mut std::ffi::c_void, *mut wl_buffer);
+    type SeatCapabilities =
+        unsafe extern "C" fn(*mut std::ffi::c_void, *mut wl_seat, std::ffi::c_uint);
+    type SeatName =
+        unsafe extern "C" fn(*mut std::ffi::c_void, *mut wl_seat, *const std::ffi::c_char);
+    type KeyboardKeymap = unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut wl_keyboard,
+        std::ffi::c_uint,
+        std::ffi::c_int,
+        std::ffi::c_uint,
+    );
+    type KeyboardEnter = unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut wl_keyboard,
+        std::ffi::c_uint,
+        *mut wl_surface,
+        *mut wl_array,
+    );
+    type KeyboardLeave = unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut wl_keyboard,
+        std::ffi::c_uint,
+        *mut wl_surface,
+    );
+    type KeyboardKey = unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut wl_keyboard,
+        std::ffi::c_uint,
+        std::ffi::c_uint,
+        std::ffi::c_uint,
+        std::ffi::c_uint,
+    );
+    type KeyboardModifiers = unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut wl_keyboard,
+        std::ffi::c_uint,
+        std::ffi::c_uint,
+        std::ffi::c_uint,
+        std::ffi::c_uint,
+        std::ffi::c_uint,
+    );
+    type KeyboardRepeatInfo = unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut wl_keyboard,
+        std::ffi::c_int,
+        std::ffi::c_int,
+    );
     #[no_mangle]
     static mut registry_listener: wl_registry_listener = wl_registry_listener {
         global: registry_global,
@@ -624,6 +726,20 @@ mod wl {
     #[no_mangle]
     static mut buffer_listener: wl_buffer_listener = wl_buffer_listener {
         release: buffer_release,
+    };
+    #[no_mangle]
+    static mut seat_listener: wl_seat_listener = wl_seat_listener {
+        capabilities: seat_capabilities,
+        name: seat_name,
+    };
+    #[no_mangle]
+    static mut keyboard_listener: wl_keyboard_listener = wl_keyboard_listener {
+        keymap: keyboard_keymap,
+        enter: keyboard_enter,
+        leave: keyboard_leave,
+        key: keyboard_key,
+        modifiers: keyboard_modifiers,
+        repeat_info: keyboard_repeat_info,
     };
 
     unsafe extern "C" fn registry_global(
@@ -658,6 +774,14 @@ mod wl {
                 registry_bind(registry, name, &xdg::xdg_wm_base_interface, version)
                     as *mut xdg::xdg_wm_base;
             xdg::wm_add_listener(state.window_manager, data.cast::<ClientState>());
+        } else if interface
+            == std::ffi::CStr::from_ptr(wl_seat_interface.name)
+                .to_str()
+                .unwrap()
+        {
+            state.seat =
+                registry_bind(registry, name, &wl_seat_interface, version) as *mut wl::wl_seat;
+            seat_add_listener(state.seat, data.cast::<ClientState>());
         }
     }
 
@@ -671,6 +795,86 @@ mod wl {
     pub unsafe extern "C" fn buffer_release(data: *mut std::ffi::c_void, _buffer: *mut wl_buffer) {
         let state = &mut *data.cast::<ClientState>();
         state.buffer_released = true;
+    }
+
+    pub unsafe extern "C" fn seat_capabilities(
+        data: *mut std::ffi::c_void,
+        _seat: *mut wl_seat,
+        capabilities: std::ffi::c_uint,
+    ) {
+        let state = &mut *data.cast::<wl::ClientState>();
+        let has_keyboard = (capabilities & SeatCapability::KEYBOARD as u32) != 0;
+        if has_keyboard && state.keyboard.is_null() {
+            state.keyboard = seat_get_keyboard(state.seat);
+            keyboard_add_listener(state.keyboard, state);
+        } else if !has_keyboard && !state.keyboard.is_null() {
+            keyboard_release(state.keyboard);
+            state.keyboard = std::ptr::null_mut();
+        }
+    }
+
+    pub unsafe extern "C" fn seat_name(
+        _data: *mut std::ffi::c_void,
+        _seat: *mut wl_seat,
+        _capabilities: *const std::ffi::c_char,
+    ) {
+    }
+
+    pub unsafe extern "C" fn keyboard_keymap(
+        _data: *mut std::ffi::c_void,
+        _keyboard: *mut wl_keyboard,
+        _format: std::ffi::c_uint,
+        _fd: std::ffi::c_int,
+        _size: std::ffi::c_uint,
+    ) {
+    }
+
+    unsafe extern "C" fn keyboard_enter(
+        _data: *mut std::ffi::c_void,
+        _keyboard: *mut wl_keyboard,
+        _serial: std::ffi::c_uint,
+        _surface: *mut wl_surface,
+        _keys: *mut wl_array,
+    ) {
+    }
+
+    unsafe extern "C" fn keyboard_leave(
+        _data: *mut std::ffi::c_void,
+        _keyboard: *mut wl_keyboard,
+        _serial: std::ffi::c_uint,
+        _surface: *mut wl_surface,
+    ) {
+    }
+
+    unsafe extern "C" fn keyboard_key(
+        data: *mut std::ffi::c_void,
+        _keyboard: *mut wl_keyboard,
+        _serial: std::ffi::c_uint,
+        _time: std::ffi::c_uint,
+        key: std::ffi::c_uint,
+        key_state: std::ffi::c_uint,
+    ) {
+        let state = &mut *data.cast::<ClientState>();
+        state.event = unix::EventType::Keyboard(key, key_state);
+    }
+
+    unsafe extern "C" fn keyboard_modifiers(
+        _data: *mut std::ffi::c_void,
+        _keyboard: *mut wl_keyboard,
+        _serial: std::ffi::c_uint,
+        _mods_depressed: std::ffi::c_uint,
+        _mods_latched: std::ffi::c_uint,
+        _mods_locked: std::ffi::c_uint,
+        _group: std::ffi::c_uint,
+    ) {
+    }
+
+    unsafe extern "C" fn keyboard_repeat_info(
+        _data: *mut std::ffi::c_void,
+        _keyboard: *mut wl_keyboard,
+        _rate: std::ffi::c_int,
+        _delay: std::ffi::c_int,
+    ) {
     }
 
     fn registry_bind(
@@ -692,6 +896,56 @@ mod wl {
                 version,
                 0,
                 args.as_mut_ptr(),
+            )
+        }
+    }
+
+    fn seat_add_listener(seat: *mut wl_seat, state: *mut ClientState) {
+        unsafe {
+            wl_proxy_add_listener(
+                seat as *mut wl_proxy,
+                std::ptr::addr_of_mut!(seat_listener).cast::<ListenerImplementation>(),
+                state as *mut std::ffi::c_void,
+            );
+        }
+    }
+
+    fn seat_get_keyboard(seat: *mut wl_seat) -> *mut wl_keyboard {
+        let proxy = seat as *mut wl_proxy;
+        unsafe {
+            let mut args: [wl_argument; 10] = std::mem::zeroed();
+            args[0].n = 0;
+            wl_proxy_marshal_array_flags(
+                proxy,
+                WL_SEAT_GET_KEYBOARD,
+                &wl_keyboard_interface,
+                wl_proxy_get_version(proxy),
+                0,
+                args.as_mut_ptr(),
+            ) as *mut wl_keyboard
+        }
+    }
+
+    fn keyboard_add_listener(keyboard: *mut wl_keyboard, state: *mut ClientState) {
+        unsafe {
+            wl_proxy_add_listener(
+                keyboard as *mut wl_proxy,
+                std::ptr::addr_of_mut!(keyboard_listener).cast::<ListenerImplementation>(),
+                state as *mut std::ffi::c_void,
+            );
+        }
+    }
+
+    fn keyboard_release(keyboard: *mut wl_keyboard) -> *mut wl_proxy {
+        let proxy = keyboard as *mut wl_proxy;
+        unsafe {
+            wl_proxy_marshal_array_flags(
+                proxy,
+                WL_KEYBOARD_RELEASE,
+                std::ptr::null(),
+                wl_proxy_get_version(proxy),
+                WL_MARSHAL_FLAG_DESTROY,
+                std::ptr::null_mut() as *mut wl_argument,
             )
         }
     }
@@ -932,6 +1186,9 @@ fn main() {
         surface: std::ptr::null_mut(),
         buffer: std::ptr::null_mut(),
 
+        seat: std::ptr::null_mut(),
+        keyboard: std::ptr::null_mut(),
+
         window_manager: std::ptr::null_mut(),
         window: std::ptr::null_mut(),
         toplevel: std::ptr::null_mut(),
@@ -977,6 +1234,27 @@ fn main() {
 
             match state.event {
                 unix::EventType::Close => state.running = false,
+                unix::EventType::Keyboard(key, key_state) => {
+                    if key == unix::KeyCode::W as u32 {
+                    } else if key == unix::KeyCode::A as u32 {
+                    } else if key == unix::KeyCode::S as u32 {
+                    } else if key == unix::KeyCode::D as u32 {
+                    } else if key == unix::KeyCode::Q as u32 {
+                    } else if key == unix::KeyCode::E as u32 {
+                    } else if key == unix::KeyCode::UP as u32 {
+                    } else if key == unix::KeyCode::LEFT as u32 {
+                    } else if key == unix::KeyCode::DOWN as u32 {
+                    } else if key == unix::KeyCode::RIGHT as u32 {
+                    } else if key == unix::KeyCode::SPACE as u32 {
+                    } else if key == unix::KeyCode::ESC as u32 {
+                        if key_state == 0 {
+                            println!("esc is not pressed");
+                        }
+                        if key_state == 1 {
+                            println!("esc is pressed");
+                        }
+                    }
+                }
                 _ => {}
             }
 
