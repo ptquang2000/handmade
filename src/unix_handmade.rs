@@ -2,13 +2,10 @@ fn render_weird_gradient(x_offset: i32, y_offset: i32, buffer: &mut unix::Offscr
     let rows = buffer
         .memory
         .as_slice_mut()
-        .chunks_exact_mut(buffer.pitch as usize)
-        .enumerate();
-    for (y, row) in rows {
-        let pixels = row
-            .chunks_exact_mut(buffer.bytes_per_pixel as usize)
-            .enumerate();
-        for (x, pixel) in pixels {
+        .chunks_exact_mut(buffer.pitch as usize);
+    for (y, row) in rows.enumerate() {
+        let pixels = row.chunks_exact_mut(buffer.bytes_per_pixel as usize);
+        for (x, pixel) in pixels.enumerate() {
             let blue = (x as i32 + x_offset) & 0xFF;
             let green = (y as i32 + y_offset) & 0xFF;
             pixel.copy_from_slice(&(blue | green << 8).to_ne_bytes());
@@ -40,11 +37,71 @@ mod unix {
         Keyboard(u32, u32),
     }
 
-    impl Default for EventType {
+    pub struct GlobalState {
+        pub compositor: *mut wl::wl_compositor,
+        pub shm: *mut wl::wl_shm,
+        pub surface: *mut wl::wl_surface,
+        pub buffer: *mut wl::wl_buffer,
+
+        pub seat: *mut wl::wl_seat,
+        pub keyboard: *mut wl::wl_keyboard,
+
+        pub window_manager: *mut xdg::xdg_wm_base,
+        pub window: *mut xdg::xdg_surface,
+        pub toplevel: *mut xdg::xdg_toplevel,
+
+        pub samples_per_second: u32,
+        pub channels: u32,
+        pub bytes_per_sample: u32,
+        pub tone_hz: u32,
+        pub tone_volume: i16,
+        pub square_wave_period: u32,
+        pub half_square_wave_period: u32,
+        pub running_sample_index: u32,
+        pub rt_thread: *mut pw::pw_thread_loop,
+        pub rt_loop: *mut pw::pw_loop,
+        pub stream: *mut pw::pw_stream,
+
+        pub event: unix::EventType,
+        pub buffer_released: bool,
+        pub back_buffer: unix::OffscreenBuffer,
+    }
+
+    impl Default for GlobalState {
         fn default() -> Self {
-            EventType::None
+            GlobalState {
+                compositor: std::ptr::null_mut(),
+                shm: std::ptr::null_mut(),
+                surface: std::ptr::null_mut(),
+                buffer: std::ptr::null_mut(),
+
+                seat: std::ptr::null_mut(),
+                keyboard: std::ptr::null_mut(),
+
+                window_manager: std::ptr::null_mut(),
+                window: std::ptr::null_mut(),
+                toplevel: std::ptr::null_mut(),
+
+                samples_per_second: 48000,
+                bytes_per_sample: 0,
+                channels: 2,
+                tone_hz: 256,
+                tone_volume: 3000,
+                square_wave_period: 0,
+                half_square_wave_period: 0,
+                running_sample_index: 0,
+                rt_thread: std::ptr::null_mut(),
+                rt_loop: std::ptr::null_mut(),
+                stream: std::ptr::null_mut(),
+
+                event: unix::EventType::None,
+                buffer_released: true,
+                back_buffer: unix::OffscreenBuffer::default(),
+            }
         }
     }
+
+    pub type ListenerImplementation = unsafe extern "C" fn();
 
     #[derive(Default)]
     pub struct OffscreenBuffer {
@@ -55,8 +112,8 @@ mod unix {
         pub bytes_per_pixel: i32,
     }
 
-    pub fn resize_shared_buffer(client_state: &mut wl::ClientState, width: i32, height: i32) {
-        let buffer = &mut client_state.back_buffer;
+    pub fn resize_shared_buffer(global_state: &mut unix::GlobalState, width: i32, height: i32) {
+        let buffer = &mut global_state.back_buffer;
         buffer.width = width;
         buffer.height = height;
         buffer.pitch = width * buffer.bytes_per_pixel;
@@ -65,9 +122,9 @@ mod unix {
             posix::memfd_release(&mut buffer.memory);
         }
 
-        buffer.memory = posix::memfd_alloc("handmade_hero", bitmap_size);
-        let pool = wl::shm_create_pool(client_state.shm, buffer.memory.fd, bitmap_size);
-        client_state.buffer = wl::shm_pool_create_buffer(
+        buffer.memory = posix::memfd_alloc("handmade_hero\0", bitmap_size);
+        let pool = wl::shm_create_pool(global_state.shm, buffer.memory.fd, bitmap_size);
+        global_state.buffer = wl::shm_pool_create_buffer(
             pool,
             0,
             buffer.width,
@@ -76,20 +133,20 @@ mod unix {
             wl::SHMFormat::XRGB8888 as u32,
         );
         wl::shm_pool_destroy(pool);
-        wl::buffer_add_listener(client_state.buffer, client_state);
+        wl::buffer_add_listener(global_state.buffer, global_state);
     }
 
-    pub fn display_buffer_in_window(client_state: &mut wl::ClientState, x: i32, y: i32) {
-        client_state.buffer_released = false;
+    pub fn display_buffer_in_window(global_state: &mut unix::GlobalState, x: i32, y: i32) {
+        global_state.buffer_released = false;
         wl::surface_damage_buffer(
-            client_state.surface,
+            global_state.surface,
             x,
             y,
-            client_state.back_buffer.width,
-            client_state.back_buffer.height,
+            global_state.back_buffer.width,
+            global_state.back_buffer.height,
         );
-        wl::surface_attach(client_state.surface, client_state.buffer, x, y);
-        wl::surface_commit(client_state.surface);
+        wl::surface_attach(global_state.surface, global_state.buffer, x, y);
+        wl::surface_commit(global_state.surface);
     }
 }
 
@@ -119,14 +176,9 @@ mod posix {
         const MAP_SHARED: i32 = 0x1;
         const MAP_FAILED: i32 = -1;
 
-        let mut buf = [0u8; 260];
-        assert!(
-            !name.is_empty() && name.len() < buf.len(),
-            "allocate_memory"
-        );
+        assert!(!name.is_empty() && name.ends_with('\0'), "allocate_memory");
 
-        buf[..name.len()].copy_from_slice(&name.as_bytes());
-        let fd = unsafe { posix::memfd_create(buf.as_ptr() as *const i8, MFD_CLOEXEC) };
+        let fd = unsafe { posix::memfd_create(name.as_ptr() as *const i8, MFD_CLOEXEC) };
         assert!(fd != -1, "memfd_create");
         let result = unsafe { posix::ftruncate(fd, size) };
         assert!(result != -1, "ftruncate");
@@ -189,28 +241,6 @@ mod posix {
 mod wl {
     use *;
 
-    #[derive(Default)]
-    pub struct ClientState {
-        pub compositor: *mut wl::wl_compositor,
-        pub shm: *mut wl::wl_shm,
-        pub surface: *mut wl::wl_surface,
-        pub buffer: *mut wl::wl_buffer,
-
-        pub seat: *mut wl::wl_seat,
-        pub keyboard: *mut wl::wl_keyboard,
-
-        pub window_manager: *mut xdg::xdg_wm_base,
-        pub window: *mut xdg::xdg_surface,
-        pub toplevel: *mut xdg::xdg_toplevel,
-
-        pub event: unix::EventType,
-        pub running: bool,
-        pub buffer_released: bool,
-        pub back_buffer: unix::OffscreenBuffer,
-    }
-
-    pub type ListenerImplementation = unsafe extern "C" fn();
-
     const WL_DISPLAY_GET_REGISTRY: u32 = 1;
 
     const WL_COMPOSITOR_CREATE_SURFACE: u32 = 0;
@@ -238,23 +268,19 @@ mod wl {
         XRGB8888 = 1,
     }
 
+    #[allow(dead_code)]
     enum SeatCapability {
-        // POINTER = 1,
+        POINTER = 1,
         KEYBOARD = 2,
-        // TOUCH = 4,
+        TOUCH = 4,
     }
 
     pub fn display_connect(sock_name: &str) -> Option<*mut wl_display> {
         let name = if sock_name.is_empty() {
             std::ptr::null()
         } else {
-            let mut buf = [0u8; 260];
-            if sock_name.len() >= buf.len() {
-                return None;
-            }
-
-            buf[..sock_name.len()].copy_from_slice(&sock_name.as_bytes());
-            buf.as_ptr() as *const i8
+            assert!(sock_name.ends_with('\0'));
+            sock_name.as_ptr() as *const i8
         };
 
         let display = unsafe { wl_display_connect(name) };
@@ -304,7 +330,7 @@ mod wl {
             if posix::poll(&mut fds, nfds, -1) == -1 {
                 wl_display_cancel_read(display);
             } else {
-                assert!(fds.revents == POLLIN);
+                assert!(fds.revents == POLLIN, "{}", fds.revents);
                 wl_display_read_events(display);
             }
 
@@ -331,22 +357,22 @@ mod wl {
         }
     }
 
-    pub fn registry_add_listener(registry: *mut wl_registry, client_state: *mut ClientState) {
+    pub fn registry_add_listener(registry: *mut wl_registry, global_state: *mut unix::GlobalState) {
         unsafe {
             wl_proxy_add_listener(
                 registry as *mut wl_proxy,
-                std::ptr::addr_of_mut!(registry_listener).cast::<ListenerImplementation>(),
-                client_state as *mut std::ffi::c_void,
+                std::ptr::addr_of_mut!(registry_listener).cast::<unix::ListenerImplementation>(),
+                global_state as *mut std::ffi::c_void,
             );
         }
     }
 
-    pub fn buffer_add_listener(buffer: *mut wl_buffer, client_state: *mut ClientState) {
+    pub fn buffer_add_listener(buffer: *mut wl_buffer, global_state: *mut unix::GlobalState) {
         unsafe {
             wl_proxy_add_listener(
                 buffer as *mut wl_proxy,
-                std::ptr::addr_of_mut!(buffer_listener).cast::<ListenerImplementation>(),
-                client_state as *mut std::ffi::c_void,
+                std::ptr::addr_of_mut!(buffer_listener).cast::<unix::ListenerImplementation>(),
+                global_state as *mut std::ffi::c_void,
             );
         }
     }
@@ -521,7 +547,7 @@ mod wl {
         ) -> *mut wl_proxy;
         pub fn wl_proxy_add_listener(
             proxy: *mut wl_proxy,
-            implementation: *mut ListenerImplementation,
+            implementation: *mut unix::ListenerImplementation,
             data: *mut std::ffi::c_void,
         ) -> std::ffi::c_int;
 
@@ -741,47 +767,33 @@ mod wl {
         interface: *const std::ffi::c_char,
         version: std::ffi::c_uint,
     ) {
-        let interface = std::ffi::CStr::from_ptr(interface).to_str().unwrap_or("");
-
-        let client_state = &mut *data.cast::<ClientState>();
-        if interface
-            == std::ffi::CStr::from_ptr(wl_compositor_interface.name)
-                .to_str()
-                .unwrap()
-        {
-            client_state.compositor =
+        let global_state = &mut *data.cast::<unix::GlobalState>();
+        let interface = std::ffi::CStr::from_ptr(interface);
+        if interface == std::ffi::CStr::from_ptr(wl_compositor_interface.name) {
+            global_state.compositor =
                 registry_bind(registry, name, &wl_compositor_interface, version)
                     as *mut wl_compositor;
-        } else if interface
-            == std::ffi::CStr::from_ptr(wl_shm_interface.name)
-                .to_str()
-                .unwrap()
-        {
-            client_state.shm =
+        } else if interface == std::ffi::CStr::from_ptr(wl_shm_interface.name) {
+            global_state.shm =
                 registry_bind(registry, name, &wl_shm_interface, version) as *mut wl_shm;
-        } else if interface
-            == std::ffi::CStr::from_ptr(xdg::xdg_wm_base_interface.name)
-                .to_str()
-                .unwrap()
-        {
-            client_state.window_manager =
+        } else if interface == std::ffi::CStr::from_ptr(xdg::xdg_wm_base_interface.name) {
+            global_state.window_manager =
                 registry_bind(registry, name, &xdg::xdg_wm_base_interface, version)
                     as *mut xdg::xdg_wm_base;
-            xdg::wm_add_listener(client_state.window_manager, data.cast::<ClientState>());
-        } else if interface
-            == std::ffi::CStr::from_ptr(wl_seat_interface.name)
-                .to_str()
-                .unwrap()
-        {
-            client_state.seat =
+            xdg::wm_add_listener(
+                global_state.window_manager,
+                data.cast::<unix::GlobalState>(),
+            );
+        } else if interface == std::ffi::CStr::from_ptr(wl_seat_interface.name) {
+            global_state.seat =
                 registry_bind(registry, name, &wl_seat_interface, version) as *mut wl::wl_seat;
-            seat_add_listener(client_state.seat, data.cast::<ClientState>());
+            seat_add_listener(global_state.seat, data.cast::<unix::GlobalState>());
         }
     }
 
     pub unsafe extern "C" fn buffer_release(data: *mut std::ffi::c_void, _buffer: *mut wl_buffer) {
-        let client_state = &mut *data.cast::<ClientState>();
-        client_state.buffer_released = true;
+        let global_state = &mut *data.cast::<unix::GlobalState>();
+        global_state.buffer_released = true;
     }
 
     pub unsafe extern "C" fn seat_capabilities(
@@ -789,14 +801,14 @@ mod wl {
         _seat: *mut wl_seat,
         capabilities: std::ffi::c_uint,
     ) {
-        let client_state = &mut *data.cast::<wl::ClientState>();
+        let global_state = &mut *data.cast::<unix::GlobalState>();
         let has_keyboard = (capabilities & SeatCapability::KEYBOARD as u32) != 0;
-        if has_keyboard && client_state.keyboard.is_null() {
-            client_state.keyboard = seat_get_keyboard(client_state.seat);
-            keyboard_add_listener(client_state.keyboard, client_state);
-        } else if !has_keyboard && !client_state.keyboard.is_null() {
-            keyboard_release(client_state.keyboard);
-            client_state.keyboard = std::ptr::null_mut();
+        if has_keyboard && global_state.keyboard.is_null() {
+            global_state.keyboard = seat_get_keyboard(global_state.seat);
+            keyboard_add_listener(global_state.keyboard, global_state);
+        } else if !has_keyboard && !global_state.keyboard.is_null() {
+            keyboard_release(global_state.keyboard);
+            global_state.keyboard = std::ptr::null_mut();
         }
     }
 
@@ -841,8 +853,8 @@ mod wl {
         key: std::ffi::c_uint,
         key_state: std::ffi::c_uint,
     ) {
-        let client_state = &mut *data.cast::<ClientState>();
-        client_state.event = unix::EventType::Keyboard(key, key_state);
+        let global_state = &mut *data.cast::<unix::GlobalState>();
+        global_state.event = unix::EventType::Keyboard(key, key_state);
     }
 
     unsafe extern "C" fn keyboard_modifiers(
@@ -887,12 +899,12 @@ mod wl {
         }
     }
 
-    fn seat_add_listener(seat: *mut wl_seat, client_state: *mut ClientState) {
+    fn seat_add_listener(seat: *mut wl_seat, global_state: *mut unix::GlobalState) {
         unsafe {
             wl_proxy_add_listener(
                 seat as *mut wl_proxy,
-                std::ptr::addr_of_mut!(seat_listener).cast::<ListenerImplementation>(),
-                client_state as *mut std::ffi::c_void,
+                std::ptr::addr_of_mut!(seat_listener).cast::<unix::ListenerImplementation>(),
+                global_state as *mut std::ffi::c_void,
             );
         }
     }
@@ -913,12 +925,12 @@ mod wl {
         }
     }
 
-    fn keyboard_add_listener(keyboard: *mut wl_keyboard, client_state: *mut ClientState) {
+    fn keyboard_add_listener(keyboard: *mut wl_keyboard, global_state: *mut unix::GlobalState) {
         unsafe {
             wl_proxy_add_listener(
                 keyboard as *mut wl_proxy,
-                std::ptr::addr_of_mut!(keyboard_listener).cast::<ListenerImplementation>(),
-                client_state as *mut std::ffi::c_void,
+                std::ptr::addr_of_mut!(keyboard_listener).cast::<unix::ListenerImplementation>(),
+                global_state as *mut std::ffi::c_void,
             );
         }
     }
@@ -949,22 +961,22 @@ mod xdg {
 
     const XDG_TOPLEVEL_SET_TITLE: u32 = 2;
 
-    pub fn wm_add_listener(wm: *mut xdg_wm_base, client_state: *mut wl::ClientState) {
+    pub fn wm_add_listener(wm: *mut xdg_wm_base, global_state: *mut unix::GlobalState) {
         unsafe {
             wl::wl_proxy_add_listener(
                 wm as *mut wl::wl_proxy,
-                std::ptr::addr_of_mut!(wm_listener).cast::<wl::ListenerImplementation>(),
-                client_state as *mut std::ffi::c_void,
+                std::ptr::addr_of_mut!(wm_listener).cast::<unix::ListenerImplementation>(),
+                global_state as *mut std::ffi::c_void,
             );
         }
     }
 
-    pub fn surface_add_listener(surface: *mut xdg_surface, client_state: *mut wl::ClientState) {
+    pub fn surface_add_listener(surface: *mut xdg_surface, global_state: *mut unix::GlobalState) {
         unsafe {
             wl::wl_proxy_add_listener(
                 surface as *mut wl::wl_proxy,
-                std::ptr::addr_of_mut!(surface_listener).cast::<wl::ListenerImplementation>(),
-                client_state as *mut std::ffi::c_void,
+                std::ptr::addr_of_mut!(surface_listener).cast::<unix::ListenerImplementation>(),
+                global_state as *mut std::ffi::c_void,
             );
         }
     }
@@ -1008,13 +1020,8 @@ mod xdg {
         let title_buf = if title.is_empty() {
             std::ptr::null()
         } else {
-            let mut buf = [0u8; 260];
-            if title.len() >= buf.len() {
-                return;
-            }
-
-            buf[..title.len()].copy_from_slice(&title.as_bytes());
-            buf.as_ptr() as *const i8
+            assert!(title.ends_with('\0'));
+            title.as_ptr() as *const i8
         };
 
         let proxy = toplevel as *mut wl::wl_proxy;
@@ -1032,12 +1039,15 @@ mod xdg {
         }
     }
 
-    pub fn toplevel_add_listener(toplevel: *mut xdg_toplevel, client_state: *mut wl::ClientState) {
+    pub fn toplevel_add_listener(
+        toplevel: *mut xdg_toplevel,
+        global_state: *mut unix::GlobalState,
+    ) {
         unsafe {
             wl::wl_proxy_add_listener(
                 toplevel as *mut wl::wl_proxy,
-                std::ptr::addr_of_mut!(toplevel_listener).cast::<wl::ListenerImplementation>(),
-                client_state as *mut std::ffi::c_void,
+                std::ptr::addr_of_mut!(toplevel_listener).cast::<unix::ListenerImplementation>(),
+                global_state as *mut std::ffi::c_void,
             );
         }
     }
@@ -1124,13 +1134,13 @@ mod xdg {
         height: std::ffi::c_int,
         _states: *mut wl::wl_array,
     ) {
-        let client_state = &mut *data.cast::<wl::ClientState>();
-        unix::resize_shared_buffer(client_state, width, height);
+        let global_state = &mut *data.cast::<unix::GlobalState>();
+        unix::resize_shared_buffer(global_state, width, height);
     }
 
     unsafe extern "C" fn toplevel_close(data: *mut std::ffi::c_void, _toplevel: *mut xdg_toplevel) {
-        let client_state = &mut *data.cast::<wl::ClientState>();
-        client_state.event = unix::EventType::Close;
+        let global_state = &mut *data.cast::<unix::GlobalState>();
+        global_state.event = unix::EventType::Close;
     }
 
     fn wm_pong(wm: *mut xdg_wm_base, serial: u32) {
@@ -1166,7 +1176,7 @@ mod xdg {
     }
 }
 
-mod pipewire {
+mod pw {
     use *;
 
     const PW_VERSION_STREAM_EVENTS: u32 = 2;
@@ -1177,18 +1187,14 @@ mod pipewire {
     const PW_KEY_MEDIA_CATEGORY: &str = "media.category\0";
     const PW_KEY_MEDIA_ROLE: &str = "media.role\0";
 
-    const M_PI_M2: f64 = std::f64::consts::PI + std::f64::consts::PI;
-    const DEFAULT_RATE: f64 = 44100.;
-    const DEFAULT_VOLUME: f64 = 0.7;
-    const DEFAULT_CHANNELS: u32 = 2;
+    pub fn init(global_state: &mut unix::GlobalState) {
+        unsafe {
+            pw_init(std::ptr::null_mut(), std::ptr::null_mut());
 
-    const SPA_AUDIO_MAX_CHANNELS: usize = 64;
-
-    macro_rules! SPA_POD_BUILDER_INIT {
-        ($buffer:expr) => {
-            spa_pod_builder {
-                data: $buffer.as_mut_ptr() as *mut std::ffi::c_void,
-                size: $buffer.len() as u32,
+            let mut pod_buffer = [0u8; 1024];
+            let mut pod_builder = spa_pod_builder {
+                data: pod_buffer.as_mut_ptr() as *mut std::ffi::c_void,
+                size: pod_buffer.len() as u32,
                 padding: 0,
                 state: spa_pod_builder_state {
                     offset: 0,
@@ -1199,16 +1205,11 @@ mod pipewire {
                     funcs: std::ptr::null(),
                     data: std::ptr::null_mut(),
                 },
-            }
-        };
-    }
-
-    pub fn init() {
-        unsafe {
-            pw_init(std::ptr::null_mut(), std::ptr::null_mut());
-
-            let mut buffer = [0u8; 1024];
-            let mut pod_builder = SPA_POD_BUILDER_INIT!(buffer);
+            };
+            global_state.rt_thread =
+                pw_thread_loop_new("handmade-loop\0".as_ptr() as *const i8, std::ptr::null());
+            global_state.rt_loop = pw_thread_loop_get_loop(global_state.rt_thread);
+            pw_thread_loop_lock(global_state.rt_thread);
 
             let mut property_items = [
                 spa_dict_item {
@@ -1226,17 +1227,15 @@ mod pipewire {
             ];
             let properties = spa_dict {
                 flags: 0,
-                n_items: 3,
+                n_items: property_items.len() as u32,
                 items: property_items.as_mut_ptr(),
             };
-            let mut data = Data::default();
-            data.main_loop = pw_main_loop_new(std::ptr::null_mut());
-            data.stream = pw_stream_new_simple(
-                pw_main_loop_get_loop(data.main_loop),
-                "handmade-audio\0".as_ptr() as *const i8,
+            global_state.stream = pw_stream_new_simple(
+                global_state.rt_loop,
+                "handmade-stream\0".as_ptr() as *const i8,
                 pw_properties_new_dict(&properties as *const spa_dict),
                 std::ptr::addr_of_mut!(stream_events),
-                std::ptr::addr_of_mut!(data) as *mut std::ffi::c_void,
+                global_state as *mut unix::GlobalState as *mut std::ffi::c_void,
             );
 
             let params = [spa_format_audio_raw_build(
@@ -1245,29 +1244,24 @@ mod pipewire {
                 &spa_audio_info_raw {
                     format: spa_audio_format::S16,
                     flags: 0,
-                    channels: DEFAULT_CHANNELS,
-                    rate: DEFAULT_RATE as u32,
-                    position: [0; SPA_AUDIO_MAX_CHANNELS],
+                    channels: global_state.channels,
+                    rate: global_state.samples_per_second,
+                    position: [0; 64],
                 },
             )];
+
             pw_stream_connect(
-                data.stream,
+                global_state.stream,
                 spa_direction::Output,
                 PW_ID_ANY,
                 PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS,
                 params.as_ptr(),
-                1,
+                params.len() as u32,
             );
 
-            pw_main_loop_run(data.main_loop);
+            pw_thread_loop_start(global_state.rt_thread);
+            pw_thread_loop_unlock(global_state.rt_thread);
         }
-    }
-
-    #[derive(Default)]
-    struct Data {
-        main_loop: *mut pw_main_loop,
-        stream: *mut pw_stream,
-        accumulator: f64,
     }
 
     #[no_mangle]
@@ -1280,14 +1274,14 @@ mod pipewire {
         param_changed: None,
         add_buffer: None,
         remove_buffer: None,
-        process: Some(on_process),
+        process: Some(on_processed),
         drained: None,
         command: None,
         trigger_done: None,
     };
 
     #[repr(C)]
-    struct pw_loop {
+    pub struct pw_loop {
         system: *mut spa_system,
         wrapped_loop: *mut spa_loop,
         control: *mut spa_loop_control,
@@ -1351,57 +1345,59 @@ mod pipewire {
         requested: std::ffi::c_longlong,
         time: std::ffi::c_longlong,
     }
+    #[repr(C)]
+    pub struct pw_properties {
+        dict: spa_dict,
+        flags: std::ffi::c_uint,
+    }
 
-    unsafe extern "C" fn on_process(userdata: *mut std::ffi::c_void) {
-        let data = &mut *userdata.cast::<Data>();
+    unsafe extern "C" fn on_processed(userdata: *mut std::ffi::c_void) {
+        let global_state = &mut *userdata.cast::<unix::GlobalState>();
 
-        let b = pw_stream_dequeue_buffer(data.stream);
-        if b.is_null() {
+        let playback_buffer = pw_stream_dequeue_buffer(global_state.stream);
+        if playback_buffer.is_null() {
             println!("out of buffers");
             return;
         }
+        let playback_buffer = &mut *playback_buffer;
 
-        let datas = &mut *(*(*b).buffer).datas;
-        if datas.data.is_null() {
+        let buffers = std::slice::from_raw_parts_mut(
+            (*playback_buffer.buffer).datas,
+            (*playback_buffer.buffer).n_datas as usize,
+        );
+        if buffers.is_empty() || buffers[0].data.is_null() {
             return;
         }
-        let dst = datas.data as *mut f64;
 
-        let stride = std::mem::size_of::<i16>() as u32 * DEFAULT_CHANNELS;
-        let mut n_frames = datas.maxsize / stride;
-        let requested = (*b).requested as u32;
-        if requested != 0 {
-            n_frames = std::cmp::min(n_frames, requested);
+        let buffer_size = (playback_buffer.requested.max(1) as u32 * global_state.bytes_per_sample)
+            .min(buffers[0].maxsize);
+        let samples =
+            std::slice::from_raw_parts_mut(buffers[0].data as *mut u8, buffer_size as usize)
+                .chunks_exact_mut(global_state.bytes_per_sample as usize);
+        for sample in samples {
+            let sample_value = 1 - 2
+                * ((global_state.running_sample_index / global_state.half_square_wave_period) % 2)
+                    as i16
+                * global_state.tone_volume;
+            std::ptr::copy_nonoverlapping(
+                [sample_value; 2].as_ptr() as *mut u8,
+                sample.as_ptr() as *mut u8,
+                global_state.bytes_per_sample as usize,
+            );
+            global_state.running_sample_index += 1;
         }
 
-        for _ in 0..n_frames {
-            data.accumulator += M_PI_M2 * 440. / DEFAULT_RATE;
-            if data.accumulator >= M_PI_M2 {
-                data.accumulator -= M_PI_M2;
-            }
-
-            let val = f64::sin(data.accumulator) * DEFAULT_VOLUME * 32767.;
-            for _ in 0..DEFAULT_CHANNELS {
-                *dst = val;
-                let _ = dst.wrapping_add(1);
-            }
-        }
-
-        let chunk = &mut *(datas.chunk);
+        let chunk = &mut *(buffers[0].chunk);
         chunk.offset = 0;
-        chunk.stride = stride as i32;
-        chunk.size = n_frames * stride;
+        chunk.stride = global_state.bytes_per_sample as i32;
+        chunk.size = buffer_size;
 
-        pw_stream_queue_buffer(data.stream, b);
+        pw_stream_queue_buffer(global_state.stream, playback_buffer);
     }
 
     #[link(name = "pipewire-0.3")]
     unsafe extern "C" {
         fn pw_init(argc: *mut std::ffi::c_int, argv: *mut *mut std::ffi::c_char);
-
-        fn pw_main_loop_new(props: *const spa_dict) -> *mut pw_main_loop;
-        fn pw_main_loop_get_loop(main_loop: *mut pw_main_loop) -> *mut pw_loop;
-        fn pw_main_loop_run(main_loop: *mut pw_main_loop) -> std::ffi::c_int;
 
         fn pw_stream_dequeue_buffer(stream: *mut pw_stream) -> *mut pw_buffer;
         fn pw_stream_queue_buffer(
@@ -1425,19 +1421,24 @@ mod pipewire {
         );
 
         fn pw_properties_new_dict(dict: *const spa_dict) -> *mut pw_properties;
+
+        fn pw_thread_loop_new(
+            name: *const std::ffi::c_char,
+            props: *const spa_dict,
+        ) -> *mut pw_thread_loop;
+        fn pw_thread_loop_get_loop(audio_loop: *mut pw_thread_loop) -> *mut pw_loop;
+        fn pw_thread_loop_lock(audio_loop: *mut pw_thread_loop);
+        fn pw_thread_loop_start(audio_loop: *mut pw_thread_loop) -> std::ffi::c_int;
+        fn pw_thread_loop_unlock(audio_loop: *mut pw_thread_loop);
     }
-    #[repr(C)]
-    pub struct pw_main_loop {
-        _data: (),
-        _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
-    }
-    #[repr(C)]
-    pub struct pw_properties {
-        _data: (),
-        _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
-    }
+    #[derive(Default)]
     #[repr(C)]
     pub struct pw_stream {
+        _data: (),
+        _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    }
+    #[repr(C)]
+    pub struct pw_thread_loop {
         _data: (),
         _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
     }
@@ -1462,7 +1463,7 @@ mod pipewire {
         items: *mut spa_dict_item,
     }
     #[repr(C)]
-    struct spa_system {
+    pub struct spa_system {
         iface: spa_interface,
     }
     #[repr(C)]
@@ -1570,11 +1571,14 @@ mod pipewire {
         flags: std::ffi::c_uint,
         rate: std::ffi::c_uint,
         channels: std::ffi::c_uint,
-        position: [std::ffi::c_uint; SPA_AUDIO_MAX_CHANNELS],
+        position: [std::ffi::c_uint; 64],
     }
+    #[allow(dead_code)]
     #[repr(C)]
     enum spa_audio_format {
         S16 = 0x104,
+        F32 = 0x11B,
+        S32 = 0x11C,
     }
     #[allow(dead_code)]
     #[repr(C)]
@@ -1588,49 +1592,42 @@ mod pipewire {
 }
 
 fn main() {
-    pipewire::init();
-
-    let mut client_state: wl::ClientState = wl::ClientState::default();
-    client_state.running = true;
-    client_state.buffer_released = true;
-    client_state.back_buffer.bytes_per_pixel = std::mem::size_of::<i32>() as i32;
+    let mut global_state: unix::GlobalState = unix::GlobalState::default();
+    global_state.back_buffer.bytes_per_pixel = std::mem::size_of::<i32>() as i32;
 
     if let Some(display) = wl::display_connect("") {
         let registry = wl::display_get_registry(display);
-        wl::registry_add_listener(registry, &mut client_state);
+        wl::registry_add_listener(registry, &mut global_state);
         wl::display_roundtrip(display);
 
-        assert!(!client_state.compositor.is_null());
-        client_state.surface = wl::compositor_create_surface(client_state.compositor);
-        client_state.window =
-            xdg::wm_get_xdg_surface(client_state.window_manager, client_state.surface);
-        xdg::surface_add_listener(client_state.window, &mut client_state);
+        assert!(!global_state.compositor.is_null());
+        global_state.surface = wl::compositor_create_surface(global_state.compositor);
+        global_state.window =
+            xdg::wm_get_xdg_surface(global_state.window_manager, global_state.surface);
+        xdg::surface_add_listener(global_state.window, &mut global_state);
 
-        client_state.toplevel = xdg::surface_get_toplevel(client_state.window);
-        xdg::toplevel_set_title(client_state.toplevel, "Handmade Hero");
-        xdg::toplevel_add_listener(client_state.toplevel, &mut client_state);
+        global_state.toplevel = xdg::surface_get_toplevel(global_state.window);
+        xdg::toplevel_set_title(global_state.toplevel, "Handmade Hero\0");
+        xdg::toplevel_add_listener(global_state.toplevel, &mut global_state);
 
-        wl::surface_commit(client_state.surface);
-        unix::resize_shared_buffer(&mut client_state, 1280, 720);
+        wl::surface_commit(global_state.surface);
+        unix::resize_shared_buffer(&mut global_state, 1280, 720);
 
         let mut x_offset = 0;
         let mut y_offset = 0;
-        while client_state.running {
-            let event_count = wl::display_dispatch_pending_single(display);
-            if event_count != -1 {
-                if client_state.buffer_released {
-                    render_weird_gradient(x_offset, y_offset, &mut client_state.back_buffer);
-                    unix::display_buffer_in_window(&mut client_state, 0, 0);
-                    x_offset += 1;
-                    y_offset += 2;
-                }
-            } else {
-                assert!(event_count == 1);
-                client_state.running = false;
+
+        global_state.bytes_per_sample = global_state.channels * std::mem::size_of::<i16>() as u32;
+        global_state.square_wave_period = global_state.samples_per_second / global_state.tone_hz;
+        global_state.half_square_wave_period = global_state.square_wave_period / 2;
+        pw::init(&mut global_state);
+
+        loop {
+            if wl::display_dispatch_pending_single(display) == -1 {
+                break;
             }
 
-            match client_state.event {
-                unix::EventType::Close => client_state.running = false,
+            match global_state.event {
+                unix::EventType::Close => break,
                 unix::EventType::Keyboard(key, key_state) => {
                     if key == unix::KeyCode::W as u32 {
                     } else if key == unix::KeyCode::A as u32 {
@@ -1654,8 +1651,14 @@ fn main() {
                 }
                 _ => {}
             }
+            global_state.event = unix::EventType::None;
 
-            client_state.event = unix::EventType::None;
+            if global_state.buffer_released {
+                render_weird_gradient(x_offset, y_offset, &mut global_state.back_buffer);
+                unix::display_buffer_in_window(&mut global_state, 0, 0);
+                x_offset += 1;
+                y_offset += 2;
+            }
         }
         wl::display_disconnect(display);
     } else {
