@@ -50,21 +50,22 @@ mod unix {
         pub window: *mut xdg::xdg_surface,
         pub toplevel: *mut xdg::xdg_toplevel,
 
+        pub event: unix::EventType,
+        pub buffer_released: bool,
+        pub back_buffer: unix::OffscreenBuffer,
+    }
+
+    pub struct SoundOutput {
         pub samples_per_second: u32,
         pub channels: u32,
         pub bytes_per_sample: u32,
         pub tone_hz: u32,
-        pub tone_volume: i16,
-        pub square_wave_period: u32,
-        pub half_square_wave_period: u32,
-        pub running_sample_index: u32,
-        pub rt_thread: *mut pw::pw_thread_loop,
-        pub rt_loop: *mut pw::pw_loop,
+        pub tone_volume: f32,
+        pub wave_period: f32,
+        pub sound_main_loop: *mut pw::pw_main_loop,
+        pub sound_loop: *mut pw::pw_loop,
         pub stream: *mut pw::pw_stream,
-
-        pub event: unix::EventType,
-        pub buffer_released: bool,
-        pub back_buffer: unix::OffscreenBuffer,
+        pub t_sine: f32,
     }
 
     impl Default for GlobalState {
@@ -81,18 +82,6 @@ mod unix {
                 window_manager: std::ptr::null_mut(),
                 window: std::ptr::null_mut(),
                 toplevel: std::ptr::null_mut(),
-
-                samples_per_second: 48000,
-                bytes_per_sample: 0,
-                channels: 2,
-                tone_hz: 256,
-                tone_volume: 3000,
-                square_wave_period: 0,
-                half_square_wave_period: 0,
-                running_sample_index: 0,
-                rt_thread: std::ptr::null_mut(),
-                rt_loop: std::ptr::null_mut(),
-                stream: std::ptr::null_mut(),
 
                 event: unix::EventType::None,
                 buffer_released: true,
@@ -1181,13 +1170,7 @@ mod pw {
 
     const PW_VERSION_STREAM_EVENTS: u32 = 2;
 
-    const PW_ID_ANY: u32 = 0xffffffff;
-
-    const PW_KEY_MEDIA_TYPE: &str = "media.type\0";
-    const PW_KEY_MEDIA_CATEGORY: &str = "media.category\0";
-    const PW_KEY_MEDIA_ROLE: &str = "media.role\0";
-
-    pub fn init(global_state: &mut unix::GlobalState) {
+    pub fn init(sound_output: &mut unix::SoundOutput) {
         unsafe {
             pw_init(std::ptr::null_mut(), std::ptr::null_mut());
 
@@ -1206,23 +1189,25 @@ mod pw {
                     data: std::ptr::null_mut(),
                 },
             };
-            global_state.rt_thread =
-                pw_thread_loop_new("handmade-loop\0".as_ptr() as *const i8, std::ptr::null());
-            global_state.rt_loop = pw_thread_loop_get_loop(global_state.rt_thread);
-            pw_thread_loop_lock(global_state.rt_thread);
+            sound_output.sound_main_loop = pw_main_loop_new(std::ptr::null_mut());
+            sound_output.sound_loop = pw_main_loop_get_loop(sound_output.sound_main_loop);
 
             let mut property_items = [
                 spa_dict_item {
-                    key: PW_KEY_MEDIA_TYPE.as_ptr() as *const i8,
+                    key: "media.type\0".as_ptr() as *const i8,
                     value: "Audio\0".as_ptr() as *const i8,
                 },
                 spa_dict_item {
-                    key: PW_KEY_MEDIA_CATEGORY.as_ptr() as *const i8,
+                    key: "media.category\0".as_ptr() as *const i8,
                     value: "Playback\0".as_ptr() as *const i8,
                 },
                 spa_dict_item {
-                    key: PW_KEY_MEDIA_ROLE.as_ptr() as *const i8,
+                    key: "media.role\0".as_ptr() as *const i8,
                     value: "Music\0".as_ptr() as *const i8,
+                },
+                spa_dict_item {
+                    key: "module.rt\0".as_ptr() as *const i8,
+                    value: "false\0".as_ptr() as *const i8,
                 },
             ];
             let properties = spa_dict {
@@ -1230,38 +1215,47 @@ mod pw {
                 n_items: property_items.len() as u32,
                 items: property_items.as_mut_ptr(),
             };
-            global_state.stream = pw_stream_new_simple(
-                global_state.rt_loop,
+            sound_output.stream = pw_stream_new_simple(
+                sound_output.sound_loop,
                 "handmade-stream\0".as_ptr() as *const i8,
                 pw_properties_new_dict(&properties as *const spa_dict),
                 std::ptr::addr_of_mut!(stream_events),
-                global_state as *mut unix::GlobalState as *mut std::ffi::c_void,
+                sound_output as *mut unix::SoundOutput as *mut std::ffi::c_void,
             );
 
             let params = [spa_format_audio_raw_build(
                 &mut pod_builder,
                 spa_param_type::EnumFormat as u32,
                 &spa_audio_info_raw {
-                    format: spa_audio_format::S16,
+                    format: spa_audio_format::F32,
                     flags: 0,
-                    channels: global_state.channels,
-                    rate: global_state.samples_per_second,
+                    channels: sound_output.channels,
+                    rate: sound_output.samples_per_second,
                     position: [0; 64],
                 },
             )];
 
             pw_stream_connect(
-                global_state.stream,
+                sound_output.stream,
                 spa_direction::Output,
-                PW_ID_ANY,
-                PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS,
+                0xffffffff,
+                StreamFlag::AutoConnect as u32 | StreamFlag::MapBuffers as u32,
                 params.as_ptr(),
                 params.len() as u32,
             );
-
-            pw_thread_loop_start(global_state.rt_thread);
-            pw_thread_loop_unlock(global_state.rt_thread);
         }
+    }
+
+    pub fn loop_iterate(sound_loop: *mut pw_loop) {
+        unsafe { pw::pw_loop_iterate(sound_loop, 0) };
+    }
+
+    pub fn loop_enter(sound_loop: *mut pw_loop) {
+        unsafe { pw::pw_loop_enter(sound_loop) };
+    }
+
+    pub fn loop_leave(sound_loop: *mut pw_loop) {
+        unsafe { pw::pw_loop_leave(sound_loop) };
     }
 
     #[no_mangle]
@@ -1352,9 +1346,9 @@ mod pw {
     }
 
     unsafe extern "C" fn on_processed(userdata: *mut std::ffi::c_void) {
-        let global_state = &mut *userdata.cast::<unix::GlobalState>();
+        let sound_output = &mut *userdata.cast::<unix::SoundOutput>();
 
-        let playback_buffer = pw_stream_dequeue_buffer(global_state.stream);
+        let playback_buffer = pw_stream_dequeue_buffer(sound_output.stream);
         if playback_buffer.is_null() {
             println!("out of buffers");
             return;
@@ -1369,30 +1363,27 @@ mod pw {
             return;
         }
 
-        let buffer_size = (playback_buffer.requested.max(1) as u32 * global_state.bytes_per_sample)
+        let buffer_size = (playback_buffer.requested.max(1) as u32 * sound_output.bytes_per_sample)
             .min(buffers[0].maxsize);
         let samples =
             std::slice::from_raw_parts_mut(buffers[0].data as *mut u8, buffer_size as usize)
-                .chunks_exact_mut(global_state.bytes_per_sample as usize);
+                .chunks_exact_mut(sound_output.bytes_per_sample as usize);
         for sample in samples {
-            let sample_value = 1 - 2
-                * ((global_state.running_sample_index / global_state.half_square_wave_period) % 2)
-                    as i16
-                * global_state.tone_volume;
+            let sample_value = sound_output.t_sine.sin() * sound_output.tone_volume;
             std::ptr::copy_nonoverlapping(
                 [sample_value; 2].as_ptr() as *mut u8,
                 sample.as_ptr() as *mut u8,
-                global_state.bytes_per_sample as usize,
+                sound_output.bytes_per_sample as usize,
             );
-            global_state.running_sample_index += 1;
+            sound_output.t_sine += 2 as f32 * std::f32::consts::PI * 1.0 / sound_output.wave_period;
         }
 
         let chunk = &mut *(buffers[0].chunk);
         chunk.offset = 0;
-        chunk.stride = global_state.bytes_per_sample as i32;
+        chunk.stride = sound_output.bytes_per_sample as i32;
         chunk.size = buffer_size;
 
-        pw_stream_queue_buffer(global_state.stream, playback_buffer);
+        pw_stream_queue_buffer(sound_output.stream, playback_buffer);
     }
 
     #[link(name = "pipewire-0.3")]
@@ -1422,14 +1413,12 @@ mod pw {
 
         fn pw_properties_new_dict(dict: *const spa_dict) -> *mut pw_properties;
 
-        fn pw_thread_loop_new(
-            name: *const std::ffi::c_char,
-            props: *const spa_dict,
-        ) -> *mut pw_thread_loop;
-        fn pw_thread_loop_get_loop(audio_loop: *mut pw_thread_loop) -> *mut pw_loop;
-        fn pw_thread_loop_lock(audio_loop: *mut pw_thread_loop);
-        fn pw_thread_loop_start(audio_loop: *mut pw_thread_loop) -> std::ffi::c_int;
-        fn pw_thread_loop_unlock(audio_loop: *mut pw_thread_loop);
+        fn pw_main_loop_new(props: *const spa_dict) -> *mut pw_main_loop;
+        fn pw_main_loop_get_loop(audio_loop: *mut pw_main_loop) -> *mut pw_loop;
+
+        fn pw_loop_enter(object: *mut pw_loop);
+        fn pw_loop_leave(object: *mut pw_loop);
+        fn pw_loop_iterate(object: *mut pw_loop, timeout: std::ffi::c_int) -> std::ffi::c_int;
     }
     #[derive(Default)]
     #[repr(C)]
@@ -1438,7 +1427,7 @@ mod pw {
         _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
     }
     #[repr(C)]
-    pub struct pw_thread_loop {
+    pub struct pw_main_loop {
         _data: (),
         _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
     }
@@ -1586,9 +1575,10 @@ mod pw {
         Input,
         Output = 1,
     }
-    const PW_STREAM_FLAG_AUTOCONNECT: u32 = 1 << 0;
-    const PW_STREAM_FLAG_MAP_BUFFERS: u32 = 1 << 2;
-    const PW_STREAM_FLAG_RT_PROCESS: u32 = 1 << 4;
+    enum StreamFlag {
+        AutoConnect = 1 << 0,
+        MapBuffers = 1 << 2,
+    }
 }
 
 fn main() {
@@ -1616,10 +1606,23 @@ fn main() {
         let mut x_offset = 0;
         let mut y_offset = 0;
 
-        global_state.bytes_per_sample = global_state.channels * std::mem::size_of::<i16>() as u32;
-        global_state.square_wave_period = global_state.samples_per_second / global_state.tone_hz;
-        global_state.half_square_wave_period = global_state.square_wave_period / 2;
-        pw::init(&mut global_state);
+        let mut sound_output = unix::SoundOutput {
+            samples_per_second: 48000,
+            bytes_per_sample: 0,
+            channels: 2,
+            tone_hz: 256,
+            tone_volume: 0.2,
+            wave_period: 0.,
+            sound_main_loop: std::ptr::null_mut(),
+            sound_loop: std::ptr::null_mut(),
+            stream: std::ptr::null_mut(),
+            t_sine: 0.,
+        };
+        sound_output.bytes_per_sample = sound_output.channels * std::mem::size_of::<f32>() as u32;
+        sound_output.wave_period =
+            sound_output.samples_per_second as f32 / sound_output.tone_hz as f32;
+        pw::init(&mut sound_output);
+        pw::loop_enter(sound_output.sound_loop);
 
         loop {
             if wl::display_dispatch_pending_single(display) == -1 {
@@ -1636,9 +1639,19 @@ fn main() {
                     } else if key == unix::KeyCode::Q as u32 {
                     } else if key == unix::KeyCode::E as u32 {
                     } else if key == unix::KeyCode::UP as u32 {
+                        y_offset += 2;
+                        sound_output.tone_hz = 512 + (x_offset as i32).rem_euclid(512) as u32;
+                        sound_output.wave_period =
+                            sound_output.samples_per_second as f32 / sound_output.tone_hz as f32;
                     } else if key == unix::KeyCode::LEFT as u32 {
+                        x_offset -= 2;
                     } else if key == unix::KeyCode::DOWN as u32 {
+                        y_offset -= 2;
+                        sound_output.tone_hz = 512 - (x_offset as i32).rem_euclid(512) as u32;
+                        sound_output.wave_period =
+                            sound_output.samples_per_second as f32 / sound_output.tone_hz as f32;
                     } else if key == unix::KeyCode::RIGHT as u32 {
+                        x_offset += 2;
                     } else if key == unix::KeyCode::SPACE as u32 {
                     } else if key == unix::KeyCode::ESC as u32 {
                         if key_state == 0 {
@@ -1657,9 +1670,10 @@ fn main() {
                 render_weird_gradient(x_offset, y_offset, &mut global_state.back_buffer);
                 unix::display_buffer_in_window(&mut global_state, 0, 0);
                 x_offset += 1;
-                y_offset += 2;
             }
+            pw::loop_iterate(sound_output.sound_loop);
         }
+        pw::loop_leave(sound_output.sound_loop);
         wl::display_disconnect(display);
     } else {
         panic!("display_connect.");
