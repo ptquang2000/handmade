@@ -195,6 +195,26 @@ mod posix {
         *memory = MemFd::default();
     }
 
+    pub fn cycle_get_count() -> u64 {
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
+
+    pub fn clock_get_time() -> Option<f64> {
+        let mut timespec = posix::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        unsafe {
+            if posix::clock_gettime(posix::CLOCK_MONOTONIC_RAW, std::ptr::addr_of_mut!(timespec))
+                == -1
+            {
+                None
+            } else {
+                Some(timespec.tv_sec as f64 + timespec.tv_nsec as f64 / 1e9)
+            }
+        }
+    }
+
     #[link(name = "c")]
     unsafe extern "C" {
         pub fn memfd_create(
@@ -212,11 +232,15 @@ mod posix {
             offset: std::ffi::c_int,
         ) -> *mut std::ffi::c_void;
         pub fn munmap(addr: *mut std::ffi::c_void, len: usize) -> std::ffi::c_int;
+
         pub fn poll(
             fds: *mut Pollfd,
             nfds: std::ffi::c_ulong,
             timeout: std::ffi::c_int,
         ) -> std::ffi::c_int;
+
+        fn clock_gettime(clockid: std::ffi::c_int, res: *mut timespec) -> std::ffi::c_int;
+
     }
 
     #[repr(C)]
@@ -225,6 +249,12 @@ mod posix {
         pub events: std::ffi::c_short,
         pub revents: std::ffi::c_short,
     }
+    #[repr(C)]
+    struct timespec {
+        tv_sec: std::ffi::c_long,
+        tv_nsec: std::ffi::c_long,
+    }
+    const CLOCK_MONOTONIC_RAW: i32 = 4;
 }
 
 mod wl {
@@ -1624,6 +1654,9 @@ fn main() {
         pw::init(&mut sound_output);
         pw::loop_enter(sound_output.sound_loop);
 
+        let mut last_timestamp = posix::clock_get_time().unwrap();
+        let mut last_cycle_count = posix::cycle_get_count();
+
         loop {
             if wl::display_dispatch_pending_single(display) == -1 {
                 break;
@@ -1641,15 +1674,11 @@ fn main() {
                     } else if key == unix::KeyCode::UP as u32 {
                         y_offset += 2;
                         sound_output.tone_hz = 512 + (x_offset as i32).rem_euclid(512) as u32;
-                        sound_output.wave_period =
-                            sound_output.samples_per_second as f32 / sound_output.tone_hz as f32;
                     } else if key == unix::KeyCode::LEFT as u32 {
                         x_offset -= 2;
                     } else if key == unix::KeyCode::DOWN as u32 {
                         y_offset -= 2;
                         sound_output.tone_hz = 512 - (x_offset as i32).rem_euclid(512) as u32;
-                        sound_output.wave_period =
-                            sound_output.samples_per_second as f32 / sound_output.tone_hz as f32;
                     } else if key == unix::KeyCode::RIGHT as u32 {
                         x_offset += 2;
                     } else if key == unix::KeyCode::SPACE as u32 {
@@ -1664,14 +1693,29 @@ fn main() {
                 }
                 _ => {}
             }
-            global_state.event = unix::EventType::None;
+            sound_output.wave_period =
+                sound_output.samples_per_second as f32 / sound_output.tone_hz as f32;
 
             if global_state.buffer_released {
                 render_weird_gradient(x_offset, y_offset, &mut global_state.back_buffer);
                 unix::display_buffer_in_window(&mut global_state, 0, 0);
-                x_offset += 1;
             }
+
             pw::loop_iterate(sound_output.sound_loop);
+
+            global_state.event = unix::EventType::None;
+
+            let end_cycle_count = posix::cycle_get_count();
+            let end_timestamp = posix::clock_get_time().unwrap();
+
+            let cycles_elapsed = end_cycle_count - last_cycle_count;
+            let ms_per_frame = (end_timestamp - last_timestamp) * 1e3;
+            let fps = 1e3 / ms_per_frame;
+            let mcpf = cycles_elapsed as f64 / 1e6;
+            println!("{:.02}ms/f, {:.02}f/s, {:.02}mc/f", ms_per_frame, fps, mcpf);
+
+            last_cycle_count = end_cycle_count;
+            last_timestamp = end_timestamp;
         }
         pw::loop_leave(sound_output.sound_loop);
         wl::display_disconnect(display);
