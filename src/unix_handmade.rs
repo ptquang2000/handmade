@@ -1,17 +1,6 @@
-fn render_weird_gradient(x_offset: i32, y_offset: i32, buffer: &mut unix::OffscreenBuffer) {
-    let rows = buffer
-        .memory
-        .as_slice_mut()
-        .chunks_exact_mut(buffer.pitch as usize);
-    for (y, row) in rows.enumerate() {
-        let pixels = row.chunks_exact_mut(buffer.bytes_per_pixel as usize);
-        for (x, pixel) in pixels.enumerate() {
-            let blue = (x as i32 + x_offset) & 0xFF;
-            let green = (y as i32 + y_offset) & 0xFF;
-            pixel.copy_from_slice(&(blue | green << 8).to_ne_bytes());
-        }
-    }
-}
+include!("handmade.rs");
+
+use game::*;
 
 mod unix {
     use *;
@@ -1697,7 +1686,14 @@ fn main() {
                 sound_output.samples_per_second as f32 / sound_output.tone_hz as f32;
 
             if global_state.buffer_released {
-                render_weird_gradient(x_offset, y_offset, &mut global_state.back_buffer);
+                let mut buffer = OffscreenBuffer {
+                    memory: global_state.back_buffer.memory.as_slice_mut(),
+                    width: global_state.back_buffer.width,
+                    height: global_state.back_buffer.height,
+                    pitch: global_state.back_buffer.pitch,
+                    bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
+                };
+                game::update_and_render(&mut buffer, x_offset, y_offset);
                 unix::display_buffer_in_window(&mut global_state, 0, 0);
             }
 
