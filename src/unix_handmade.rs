@@ -49,12 +49,9 @@ mod unix {
         pub channels: u32,
         pub bytes_per_sample: u32,
         pub tone_hz: u32,
-        pub tone_volume: f32,
-        pub wave_period: f32,
         pub sound_main_loop: *mut pw::pw_main_loop,
         pub sound_loop: *mut pw::pw_loop,
         pub stream: *mut pw::pw_stream,
-        pub t_sine: f32,
     }
 
     impl Default for GlobalState {
@@ -1384,18 +1381,18 @@ mod pw {
 
         let buffer_size = (playback_buffer.requested.max(1) as u32 * sound_output.bytes_per_sample)
             .min(buffers[0].maxsize);
-        let samples =
-            std::slice::from_raw_parts_mut(buffers[0].data as *mut u8, buffer_size as usize)
-                .chunks_exact_mut(sound_output.bytes_per_sample as usize);
-        for sample in samples {
-            let sample_value = sound_output.t_sine.sin() * sound_output.tone_volume;
-            std::ptr::copy_nonoverlapping(
-                [sample_value; 2].as_ptr() as *mut u8,
-                sample.as_ptr() as *mut u8,
-                sound_output.bytes_per_sample as usize,
-            );
-            sound_output.t_sine += 2 as f32 * std::f32::consts::PI * 1.0 / sound_output.wave_period;
-        }
+
+        game::output_sound(
+            game::SoundOutputBuffer {
+                samples: std::slice::from_raw_parts_mut(
+                    buffers[0].data as *mut u8,
+                    buffer_size as usize,
+                ),
+                samples_per_second: sound_output.samples_per_second,
+                bytes_per_sample: sound_output.bytes_per_sample,
+            },
+            sound_output.tone_hz,
+        );
 
         let chunk = &mut *(buffers[0].chunk);
         chunk.offset = 0;
@@ -1630,16 +1627,11 @@ fn main() {
             bytes_per_sample: 0,
             channels: 2,
             tone_hz: 256,
-            tone_volume: 0.2,
-            wave_period: 0.,
             sound_main_loop: std::ptr::null_mut(),
             sound_loop: std::ptr::null_mut(),
             stream: std::ptr::null_mut(),
-            t_sine: 0.,
         };
         sound_output.bytes_per_sample = sound_output.channels * std::mem::size_of::<f32>() as u32;
-        sound_output.wave_period =
-            sound_output.samples_per_second as f32 / sound_output.tone_hz as f32;
         pw::init(&mut sound_output);
         pw::loop_enter(sound_output.sound_loop);
 
@@ -1682,8 +1674,6 @@ fn main() {
                 }
                 _ => {}
             }
-            sound_output.wave_period =
-                sound_output.samples_per_second as f32 / sound_output.tone_hz as f32;
 
             if global_state.buffer_released {
                 let mut buffer = OffscreenBuffer {

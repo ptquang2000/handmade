@@ -7,6 +7,12 @@ pub mod game {
         pub bytes_per_pixel: i32,
     }
 
+    pub struct SoundOutputBuffer<'a> {
+        pub samples: &'a mut [u8],
+        pub samples_per_second: u32,
+        pub bytes_per_sample: u32,
+    }
+
     pub fn update_and_render(buffer: &mut OffscreenBuffer, x_offset: i32, y_offset: i32) {
         render_weird_gradient(
             buffer.memory,
@@ -15,6 +21,23 @@ pub mod game {
             x_offset,
             y_offset,
         );
+    }
+
+    pub fn output_sound(sound_buffer: SoundOutputBuffer, tone_hz: u32) {
+        static mut T_SINE: f32 = 0.;
+        let tone_volume = 0.2;
+        let wave_period = sound_buffer.samples_per_second as f32 / tone_hz as f32;
+
+        for sample in sound_buffer
+            .samples
+            .chunks_exact_mut(sound_buffer.bytes_per_sample as usize)
+        {
+            let sample_value = (unsafe { T_SINE.sin() } * tone_volume).to_ne_bytes();
+            for sample_per_channel in sample.chunks_exact_mut(sample_value.len()) {
+                sample_per_channel.copy_from_slice(&sample_value);
+            }
+            unsafe { T_SINE += 2 as f32 * std::f32::consts::PI * 1.0 / wave_period };
+        }
     }
 
     fn render_weird_gradient(
