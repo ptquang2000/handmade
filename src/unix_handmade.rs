@@ -1,5 +1,26 @@
 include!("handmade.rs");
 
+macro_rules! kilobytes {
+    ($value:expr) => {
+        $value * 1024
+    };
+}
+macro_rules! megabytes {
+    ($value:expr) => {
+        kilobytes!($value) * 1024
+    };
+}
+macro_rules! gigabytes {
+    ($value:expr) => {
+        megabytes!($value) * 1024
+    };
+}
+macro_rules! terabytes {
+    ($value:expr) => {
+        gigabytes!($value) * 1024
+    };
+}
+
 use game::*;
 
 mod unix {
@@ -97,7 +118,7 @@ mod unix {
             posix::memfd_release(&mut buffer.memory);
         }
 
-        buffer.memory = posix::memfd_alloc("handmade_hero\0", bitmap_size);
+        buffer.memory = posix::memfd_alloc("handmade_hero\0", bitmap_size as i64, 0).unwrap();
         let pool = wl::shm_create_pool(global_state.shm, buffer.memory.fd, bitmap_size);
         global_state.buffer = wl::shm_pool_create_buffer(
             pool,
@@ -157,7 +178,7 @@ mod posix {
         }
     }
 
-    pub fn memfd_alloc(name: &str, size: i32) -> MemFd {
+    pub fn memfd_alloc(name: &str, size: i64, addr: usize) -> Option<MemFd> {
         const MFD_CLOEXEC: u32 = 0x0001;
         const PROT_READ: i32 = 0x1;
         const PROT_WRITE: i32 = 0x2;
@@ -167,12 +188,20 @@ mod posix {
         assert!(!name.is_empty() && name.ends_with('\0'), "allocate_memory");
 
         let fd = unsafe { posix::memfd_create(name.as_ptr() as *const i8, MFD_CLOEXEC) };
-        assert!(fd != -1, "memfd_create");
+        if fd == -1 {
+            println!("Failed to memfd_create");
+            return None;
+        }
+
         let result = unsafe { posix::ftruncate(fd, size) };
-        assert!(result != -1, "ftruncate");
+        if result == -1 {
+            println!("Failed to ftruncate");
+            return None;
+        }
+
         let addr = unsafe {
             posix::mmap(
-                std::ptr::null_mut(),
+                addr as *const std::ffi::c_void,
                 size as usize,
                 PROT_READ | PROT_WRITE,
                 MAP_SHARED,
@@ -180,12 +209,16 @@ mod posix {
                 0,
             ) as *mut ()
         };
-        assert!(addr as i32 != MAP_FAILED, "mmap");
-        MemFd {
+        if addr as i32 == MAP_FAILED {
+            println!("Failed to mmap");
+            return None;
+        }
+
+        Some(MemFd {
             fd: fd,
             addr: addr as *mut u8,
             size: size as usize,
-        }
+        })
     }
 
     pub fn memfd_release(memory: &mut MemFd) {
@@ -221,7 +254,7 @@ mod posix {
             oflag: std::ffi::c_uint,
         ) -> std::ffi::c_int;
         pub fn close(fd: std::ffi::c_int) -> std::ffi::c_int;
-        pub fn ftruncate(fd: std::ffi::c_int, length: std::ffi::c_int) -> std::ffi::c_int;
+        pub fn ftruncate(fd: std::ffi::c_int, length: std::ffi::c_long) -> std::ffi::c_int;
         pub fn mmap(
             addr: *const std::ffi::c_void,
             length: usize,
@@ -1650,6 +1683,28 @@ fn main() {
         let mut last_timestamp = posix::clock_get_time().unwrap();
         let mut last_cycle_count = posix::cycle_get_count();
 
+        let permanent_storage_size = megabytes!(64);
+        let transient_storage_size = gigabytes!(4);
+        let base_address = if cfg!(HANDMADE_INTERNAL) {
+            terabytes!(2)
+        } else {
+            0
+        };
+        let mut allocated_memory = posix::memfd_alloc(
+            "\0",
+            permanent_storage_size + transient_storage_size,
+            base_address,
+        )
+        .unwrap_or(posix::MemFd::default());
+        let (permanent_storage, transient_storage) = allocated_memory
+            .as_slice_mut()
+            .split_at_mut(permanent_storage_size as usize);
+        let mut game_memory = game::Memory {
+            is_initialized: false,
+            permanent_storage: permanent_storage,
+            transient_storage: transient_storage,
+        };
+
         loop {
             let [mut new_input, mut old_input] = &mut inputs;
             if wl::display_dispatch_pending_single(display) == -1 {
@@ -1739,7 +1794,7 @@ fn main() {
                     pitch: global_state.back_buffer.pitch,
                     bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
                 };
-                game::update_and_render(&mut new_input, &mut buffer);
+                game::update_and_render(&mut game_memory, &mut new_input, &mut buffer);
                 unix::display_buffer_in_window(&mut global_state, 0, 0);
             }
 
@@ -1759,6 +1814,7 @@ fn main() {
             last_cycle_count = end_cycle_count;
             last_timestamp = end_timestamp;
         }
+
         pw::loop_leave(sound_output.sound_loop);
         wl::display_disconnect(display);
     } else {

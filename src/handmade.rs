@@ -34,21 +34,50 @@ pub mod game {
         pub controllers: [ControllerInput; 1],
     }
 
-    pub fn update_and_render(inputs: &mut Input, buffer: &mut OffscreenBuffer) {
-        static mut BLUE_OFFSET: i32 = 0;
-        static mut GREEN_OFFSET: i32 = 0;
+    pub struct Memory<'a> {
+        pub is_initialized: bool,
+
+        pub permanent_storage: &'a mut [u8],
+        pub transient_storage: &'a mut [u8],
+    }
+
+    impl Memory<'_> {
+        fn get_game_state(&self) -> &mut State {
+            assert!(std::mem::size_of::<State>() <= self.transient_storage.len());
+            unsafe { &mut *(self.permanent_storage.as_ptr() as *mut State) }
+        }
+    }
+
+    pub struct State {
+        tone_hz: i32,
+        green_offset: i32,
+        blue_offset: i32,
+    }
+
+    pub fn update_and_render(
+        memory: &mut Memory,
+        inputs: &mut Input,
+        buffer: &mut OffscreenBuffer,
+    ) {
+        if !memory.is_initialized {
+            let game_state = memory.get_game_state();
+            game_state.tone_hz = 256;
+
+            memory.is_initialized = true;
+        }
+        let game_state = memory.get_game_state();
 
         let input0 = &inputs.controllers[0];
         if input0.down.ended_down {
-            unsafe { GREEN_OFFSET += 4 };
+            game_state.green_offset += 4;
         }
 
         render_weird_gradient(
             buffer.memory,
             buffer.pitch as usize,
             buffer.bytes_per_pixel as usize,
-            unsafe { BLUE_OFFSET },
-            unsafe { GREEN_OFFSET },
+            game_state.blue_offset,
+            game_state.green_offset,
         );
     }
 
