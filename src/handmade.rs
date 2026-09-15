@@ -13,13 +13,42 @@ pub mod game {
         pub bytes_per_sample: u32,
     }
 
-    pub fn update_and_render(buffer: &mut OffscreenBuffer, x_offset: i32, y_offset: i32) {
+    #[derive(Default, Copy, Clone)]
+    pub struct ButtonState {
+        pub half_transition_count: i32,
+        pub ended_down: bool,
+    }
+
+    #[derive(Default, Copy, Clone)]
+    pub struct ControllerInput {
+        pub up: ButtonState,
+        pub down: ButtonState,
+        pub left: ButtonState,
+        pub right: ButtonState,
+        pub left_shoulder: ButtonState,
+        pub right_shoulder: ButtonState,
+    }
+
+    #[derive(Default, Copy, Clone)]
+    pub struct Input {
+        pub controllers: [ControllerInput; 1],
+    }
+
+    pub fn update_and_render(inputs: &mut Input, buffer: &mut OffscreenBuffer) {
+        static mut BLUE_OFFSET: i32 = 0;
+        static mut GREEN_OFFSET: i32 = 0;
+
+        let input0 = &inputs.controllers[0];
+        if input0.down.ended_down {
+            unsafe { GREEN_OFFSET += 4 };
+        }
+
         render_weird_gradient(
             buffer.memory,
             buffer.pitch as usize,
             buffer.bytes_per_pixel as usize,
-            x_offset,
-            y_offset,
+            unsafe { BLUE_OFFSET },
+            unsafe { GREEN_OFFSET },
         );
     }
 

@@ -123,6 +123,19 @@ mod unix {
         wl::surface_attach(global_state.surface, global_state.buffer, x, y);
         wl::surface_commit(global_state.surface);
     }
+
+    pub fn process_input_digital_button(
+        old_state: &mut game::ButtonState,
+        key_state: u32,
+        new_state: &mut game::ButtonState,
+    ) {
+        new_state.ended_down = key_state == 1;
+        new_state.half_transition_count += if old_state.ended_down != new_state.ended_down {
+            1
+        } else {
+            0
+        };
+    }
 }
 
 mod posix {
@@ -1619,9 +1632,6 @@ fn main() {
         wl::surface_commit(global_state.surface);
         unix::resize_shared_buffer(&mut global_state, 1280, 720);
 
-        let mut x_offset = 0;
-        let mut y_offset = 0;
-
         let mut sound_output = unix::SoundOutput {
             samples_per_second: 48000,
             bytes_per_sample: 0,
@@ -1635,10 +1645,13 @@ fn main() {
         pw::init(&mut sound_output);
         pw::loop_enter(sound_output.sound_loop);
 
+        let mut inputs = [game::Input::default(); 2];
+
         let mut last_timestamp = posix::clock_get_time().unwrap();
         let mut last_cycle_count = posix::cycle_get_count();
 
         loop {
+            let [mut new_input, mut old_input] = &mut inputs;
             if wl::display_dispatch_pending_single(display) == -1 {
                 break;
             }
@@ -1646,31 +1659,74 @@ fn main() {
             match global_state.event {
                 unix::EventType::Close => break,
                 unix::EventType::Keyboard(key, key_state) => {
+                    let new_controller = &mut new_input.controllers[0];
+                    let old_controller = &mut old_input.controllers[0];
+
                     if key == unix::KeyCode::W as u32 {
+                        unix::process_input_digital_button(
+                            &mut old_controller.up,
+                            key_state,
+                            &mut new_controller.up,
+                        );
                     } else if key == unix::KeyCode::A as u32 {
+                        unix::process_input_digital_button(
+                            &mut old_controller.left,
+                            key_state,
+                            &mut new_controller.left,
+                        );
                     } else if key == unix::KeyCode::S as u32 {
+                        unix::process_input_digital_button(
+                            &mut old_controller.down,
+                            key_state,
+                            &mut new_controller.down,
+                        );
                     } else if key == unix::KeyCode::D as u32 {
+                        unix::process_input_digital_button(
+                            &mut old_controller.right,
+                            key_state,
+                            &mut new_controller.right,
+                        );
                     } else if key == unix::KeyCode::Q as u32 {
+                        unix::process_input_digital_button(
+                            &mut old_controller.left_shoulder,
+                            key_state,
+                            &mut new_controller.left_shoulder,
+                        );
                     } else if key == unix::KeyCode::E as u32 {
+                        unix::process_input_digital_button(
+                            &mut old_controller.right_shoulder,
+                            key_state,
+                            &mut new_controller.right_shoulder,
+                        );
                     } else if key == unix::KeyCode::UP as u32 {
-                        y_offset += 2;
-                        sound_output.tone_hz = 512 + (x_offset as i32).rem_euclid(512) as u32;
+                        unix::process_input_digital_button(
+                            &mut old_controller.up,
+                            key_state,
+                            &mut new_controller.up,
+                        );
                     } else if key == unix::KeyCode::LEFT as u32 {
-                        x_offset -= 2;
+                        unix::process_input_digital_button(
+                            &mut old_controller.left,
+                            key_state,
+                            &mut new_controller.left,
+                        );
                     } else if key == unix::KeyCode::DOWN as u32 {
-                        y_offset -= 2;
-                        sound_output.tone_hz = 512 - (x_offset as i32).rem_euclid(512) as u32;
+                        unix::process_input_digital_button(
+                            &mut old_controller.down,
+                            key_state,
+                            &mut new_controller.down,
+                        );
                     } else if key == unix::KeyCode::RIGHT as u32 {
-                        x_offset += 2;
+                        unix::process_input_digital_button(
+                            &mut old_controller.right,
+                            key_state,
+                            &mut new_controller.right,
+                        );
                     } else if key == unix::KeyCode::SPACE as u32 {
                     } else if key == unix::KeyCode::ESC as u32 {
-                        if key_state == 0 {
-                            println!("esc is not pressed");
-                        }
-                        if key_state == 1 {
-                            println!("esc is pressed");
-                        }
                     }
+
+                    inputs.swap(0, 1);
                 }
                 _ => {}
             }
@@ -1683,7 +1739,7 @@ fn main() {
                     pitch: global_state.back_buffer.pitch,
                     bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
                 };
-                game::update_and_render(&mut buffer, x_offset, y_offset);
+                game::update_and_render(&mut new_input, &mut buffer);
                 unix::display_buffer_in_window(&mut global_state, 0, 0);
             }
 
