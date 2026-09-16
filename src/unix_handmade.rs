@@ -23,6 +23,82 @@ macro_rules! terabytes {
 
 use game::*;
 
+#[cfg(HANDMADE_INTERNAL)]
+pub mod debug_platform {
+    use *;
+
+    pub fn read_entire_file(filename: &str) -> Option<(*mut (), i64)> {
+        assert!(filename.ends_with('\0'));
+        unsafe {
+            let fd = posix::open(
+                filename.as_ptr() as *const std::ffi::c_void,
+                posix::O_RDONLY,
+                posix::S_IRUSR | posix::S_IRGRP | posix::S_IROTH,
+            );
+            if fd != -1 {
+                let size = posix::lseek(fd, 0, posix::SEEK_END);
+                if size != -1 {
+                    let result = posix::mmap(
+                        std::ptr::null_mut(),
+                        size as usize,
+                        posix::PROT_READ,
+                        posix::MAP_PRIVATE,
+                        fd,
+                        0,
+                    ) as *mut ();
+                    if result as i32 != posix::MAP_FAILED {
+                        return Some((result, size));
+                    }
+                } else {
+                }
+                posix::close(fd);
+            } else {
+            }
+        }
+        None
+    }
+
+    pub fn write_entire_file(filename: &str, memory: *mut (), memory_size: i64) -> bool {
+        assert!(filename.ends_with('\0'));
+        unsafe {
+            let fd = posix::open(
+                filename.as_ptr() as *const std::ffi::c_void,
+                posix::O_RDWR | posix::O_CREAT | posix::O_TRUNC,
+                posix::S_IRUSR | posix::S_IWUSR | posix::S_IRGRP | posix::S_IROTH,
+            );
+            if fd != -1 {
+                if posix::ftruncate(fd, memory_size) != -1 {
+                    let result = posix::mmap(
+                        std::ptr::null_mut(),
+                        memory_size as usize,
+                        posix::PROT_WRITE,
+                        posix::MAP_SHARED,
+                        fd,
+                        0,
+                    ) as *mut ();
+                    if result as i32 != posix::MAP_FAILED {
+                        std::ptr::copy_nonoverlapping(
+                            memory as *const u8,
+                            result as *mut u8,
+                            memory_size as usize,
+                        );
+                        posix::munmap(result as *mut std::ffi::c_void, memory_size as usize);
+                        return true;
+                    } else {
+                    }
+                }
+                posix::close(fd);
+            } else {
+            }
+        }
+        false
+    }
+
+    pub fn free_file_memory(memory: *mut (), size: i64) {
+        unsafe { posix::munmap(memory as *mut std::ffi::c_void, size as usize) };
+    }
+}
+
 mod unix {
     use *;
 
@@ -162,11 +238,34 @@ mod unix {
 mod posix {
     use *;
 
+    pub const MFD_CLOEXEC: u32 = 0x0001;
+
+    pub const PROT_READ: i32 = 0x1;
+    pub const PROT_WRITE: i32 = 0x2;
+
+    pub const MAP_SHARED: i32 = 0x1;
+    pub const MAP_PRIVATE: i32 = 0x2;
+    pub const MAP_FAILED: i32 = -1;
+
+    pub const CLOCK_MONOTONIC_RAW: i32 = 4;
+
+    pub const O_RDONLY: i32 = 0x000;
+    pub const O_RDWR: i32 = 0x002;
+    pub const O_CREAT: i32 = 0x040;
+    pub const O_TRUNC: i32 = 0x200;
+
+    pub const S_IRUSR: i64 = 0o0400;
+    pub const S_IWUSR: i64 = 0o0200;
+    pub const S_IRGRP: i64 = S_IRUSR >> 3;
+    pub const S_IROTH: i64 = S_IRGRP >> 3;
+
+    pub const SEEK_END: i32 = 2;
+
     #[derive(Default)]
     pub struct MemFd {
         pub fd: i32,
-        addr: *mut u8,
-        size: usize,
+        pub addr: *mut u8,
+        pub size: usize,
     }
 
     impl MemFd {
@@ -179,12 +278,6 @@ mod posix {
     }
 
     pub fn memfd_alloc(name: &str, size: i64, addr: usize) -> Option<MemFd> {
-        const MFD_CLOEXEC: u32 = 0x0001;
-        const PROT_READ: i32 = 0x1;
-        const PROT_WRITE: i32 = 0x2;
-        const MAP_SHARED: i32 = 0x1;
-        const MAP_FAILED: i32 = -1;
-
         assert!(!name.is_empty() && name.ends_with('\0'), "allocate_memory");
 
         let fd = unsafe { posix::memfd_create(name.as_ptr() as *const i8, MFD_CLOEXEC) };
@@ -273,6 +366,16 @@ mod posix {
 
         fn clock_gettime(clockid: std::ffi::c_int, res: *mut timespec) -> std::ffi::c_int;
 
+        pub fn open(
+            path: *const std::ffi::c_void,
+            flag: std::ffi::c_int,
+            mode: std::ffi::c_long,
+        ) -> std::ffi::c_int;
+        pub fn lseek(
+            fd: std::ffi::c_int,
+            offset: std::ffi::c_long,
+            whence: std::ffi::c_int,
+        ) -> std::ffi::c_long;
     }
 
     #[repr(C)]
@@ -286,7 +389,6 @@ mod posix {
         tv_sec: std::ffi::c_long,
         tv_nsec: std::ffi::c_long,
     }
-    const CLOCK_MONOTONIC_RAW: i32 = 4;
 }
 
 mod wl {

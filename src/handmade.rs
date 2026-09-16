@@ -1,4 +1,19 @@
+#[cfg(not(HANDMADE_INTERNAL))]
+pub mod debug_platform {
+    pub fn read_entire_file(filename: &str) -> Option<(*mut (), i64)> {
+        None
+    }
+
+    pub fn write_entire_file(filename: &str, memory: *mut (), memory_size: i64) -> bool {
+        false
+    }
+
+    pub fn free_file_memory(memory: *mut (), size: i64) {}
+}
+
 pub mod game {
+    use *;
+
     pub struct OffscreenBuffer<'a> {
         pub memory: &'a mut [u8],
         pub width: i32,
@@ -62,6 +77,12 @@ pub mod game {
         if !memory.is_initialized {
             let game_state = memory.get_game_state();
             game_state.tone_hz = 256;
+
+            let filename = concat!(file!(), "\0");
+            if let Some((contents, contents_size)) = debug_platform::read_entire_file(filename) {
+                debug_platform::write_entire_file("test.out\0", contents, contents_size);
+                debug_platform::free_file_memory(contents, contents_size);
+            }
 
             memory.is_initialized = true;
         }
