@@ -69,11 +69,7 @@ pub mod game {
         blue_offset: i32,
     }
 
-    pub fn update_and_render(
-        memory: &mut Memory,
-        inputs: &mut Input,
-        buffer: &mut OffscreenBuffer,
-    ) {
+    pub fn update_and_render(memory: &mut Memory, inputs: Input, buffer: OffscreenBuffer) {
         if !memory.is_initialized {
             let game_state = memory.get_game_state();
             game_state.tone_hz = 256;

@@ -1,0 +1,9 @@
+[package]
+name = "handmade"
+version = "0.1.0"
+edition = "2015"
+build = "build.rs"
+
+[[bin]]
+name = "unix_handmade"
+path = "src/unix_handmade.rs"

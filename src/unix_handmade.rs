@@ -21,11 +21,9 @@ macro_rules! terabytes {
     };
 }
 
-use game::*;
-
 #[cfg(HANDMADE_INTERNAL)]
 pub mod debug_platform {
-    use *;
+    use crate::posix;
 
     pub fn read_entire_file(filename: &str) -> Option<(*mut (), i64)> {
         assert!(filename.ends_with('\0'));
@@ -100,7 +98,7 @@ pub mod debug_platform {
 }
 
 mod unix {
-    use *;
+    use crate::{game, posix, pw, unix, wl, xdg};
 
     pub enum KeyCode {
         ESC = 1,
@@ -117,12 +115,7 @@ mod unix {
         DOWN = 108,
     }
 
-    pub enum EventType {
-        None,
-        Close,
-        Keyboard(u32, u32),
-    }
-
+    #[derive(Default)]
     pub struct GlobalState {
         pub compositor: *mut wl::wl_compositor,
         pub shm: *mut wl::wl_shm,
@@ -136,11 +129,14 @@ mod unix {
         pub window: *mut xdg::xdg_surface,
         pub toplevel: *mut xdg::xdg_toplevel,
 
-        pub event: unix::EventType,
+        pub new_game_input: *mut game::Input,
+
+        pub running: bool,
         pub buffer_released: bool,
         pub back_buffer: unix::OffscreenBuffer,
     }
 
+    #[derive(Default)]
     pub struct SoundOutput {
         pub samples_per_second: u32,
         pub channels: u32,
@@ -149,28 +145,6 @@ mod unix {
         pub sound_main_loop: *mut pw::pw_main_loop,
         pub sound_loop: *mut pw::pw_loop,
         pub stream: *mut pw::pw_stream,
-    }
-
-    impl Default for GlobalState {
-        fn default() -> Self {
-            GlobalState {
-                compositor: std::ptr::null_mut(),
-                shm: std::ptr::null_mut(),
-                surface: std::ptr::null_mut(),
-                buffer: std::ptr::null_mut(),
-
-                seat: std::ptr::null_mut(),
-                keyboard: std::ptr::null_mut(),
-
-                window_manager: std::ptr::null_mut(),
-                window: std::ptr::null_mut(),
-                toplevel: std::ptr::null_mut(),
-
-                event: unix::EventType::None,
-                buffer_released: true,
-                back_buffer: unix::OffscreenBuffer::default(),
-            }
-        }
     }
 
     pub type ListenerImplementation = unsafe extern "C" fn();
@@ -221,22 +195,14 @@ mod unix {
         wl::surface_commit(global_state.surface);
     }
 
-    pub fn process_input_digital_button(
-        old_state: &mut game::ButtonState,
-        key_state: u32,
-        new_state: &mut game::ButtonState,
-    ) {
-        new_state.ended_down = key_state == 1;
-        new_state.half_transition_count += if old_state.ended_down != new_state.ended_down {
-            1
-        } else {
-            0
-        };
+    pub fn process_keyboard_message(new_state: &mut game::ButtonState, is_down: bool) {
+        new_state.ended_down = is_down;
+        new_state.half_transition_count += 1;
     }
 }
 
 mod posix {
-    use *;
+    use crate::posix;
 
     pub const MFD_CLOEXEC: u32 = 0x0001;
 
@@ -392,7 +358,7 @@ mod posix {
 }
 
 mod wl {
-    use *;
+    use crate::{game, posix, unix, wl, xdg};
 
     const WL_DISPLAY_GET_REGISTRY: u32 = 1;
 
@@ -409,8 +375,6 @@ mod wl {
     const WL_SHM_POOL_CREATE_BUFFER: u32 = 0;
     const WL_SHM_POOL_DESTROY: u32 = 1;
 
-    const WL_BUFFER_DESTROY: u32 = 0;
-
     const WL_MARSHAL_FLAG_DESTROY: u32 = 1;
 
     const WL_SEAT_GET_KEYBOARD: u32 = 1;
@@ -421,11 +385,8 @@ mod wl {
         XRGB8888 = 1,
     }
 
-    #[allow(dead_code)]
     enum SeatCapability {
-        POINTER = 1,
         KEYBOARD = 2,
-        TOUCH = 4,
     }
 
     pub fn display_connect(sock_name: &str) -> Option<*mut wl_display> {
@@ -448,28 +409,10 @@ mod wl {
         unsafe { wl_display_disconnect(display) }
     }
 
-    #[allow(dead_code)]
-    pub fn display_dispatch(display: *mut wl_display) -> i32 {
-        unsafe { wl_display_dispatch(display) }
-    }
-
-    #[allow(dead_code)]
     pub fn display_dispatch_pending(display: *mut wl_display) -> i32 {
         unsafe {
             while wl_display_prepare_read(display) != 0 {
                 wl_display_dispatch_pending(display);
-            }
-            wl_display_flush(display);
-
-            wl_display_read_events(display);
-            wl_display_dispatch_pending(display)
-        }
-    }
-
-    pub fn display_dispatch_pending_single(display: *mut wl_display) -> i32 {
-        unsafe {
-            while wl_display_prepare_read(display) != 0 {
-                wl_display_dispatch_pending_single(display);
             }
             wl_display_flush(display);
 
@@ -480,10 +423,10 @@ mod wl {
                 revents: 0,
             };
             let nfds = 1;
-            if posix::poll(&mut fds, nfds, -1) == -1 {
+            if posix::poll(&mut fds, nfds, 0) == -1 {
                 wl_display_cancel_read(display);
             } else {
-                assert!(fds.revents == POLLIN, "{}", fds.revents);
+                // assert!(fds.revents == POLLIN, "{}", fds.revents);
                 wl_display_read_events(display);
             }
 
@@ -526,21 +469,6 @@ mod wl {
                 buffer as *mut wl_proxy,
                 std::ptr::addr_of_mut!(buffer_listener).cast::<unix::ListenerImplementation>(),
                 global_state as *mut std::ffi::c_void,
-            );
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn buffer_destroy(buffer: *mut wl_buffer) {
-        let proxy = buffer as *mut wl_proxy;
-        unsafe {
-            wl_proxy_marshal_array_flags(
-                proxy,
-                WL_BUFFER_DESTROY,
-                std::ptr::null(),
-                wl_proxy_get_version(proxy),
-                WL_MARSHAL_FLAG_DESTROY,
-                std::ptr::null_mut() as *mut wl_argument,
             );
         }
     }
@@ -707,9 +635,7 @@ mod wl {
         fn wl_display_roundtrip(display: *mut wl_display) -> std::ffi::c_int;
         fn wl_display_connect(name: *const std::ffi::c_char) -> *mut wl_display;
         fn wl_display_disconnect(display: *mut wl_display);
-        fn wl_display_dispatch(display: *mut wl_display) -> std::ffi::c_int;
         fn wl_display_dispatch_pending(display: *mut wl_display) -> std::ffi::c_int;
-        fn wl_display_dispatch_pending_single(display: *mut wl_display) -> std::ffi::c_int;
         fn wl_display_flush(display: *mut wl_display) -> std::ffi::c_int;
         fn wl_display_read_events(display: *mut wl_display) -> std::ffi::c_int;
         fn wl_display_prepare_read(display: *mut wl_display) -> std::ffi::c_int;
@@ -1007,7 +933,31 @@ mod wl {
         key_state: std::ffi::c_uint,
     ) {
         let global_state = &mut *data.cast::<unix::GlobalState>();
-        global_state.event = unix::EventType::Keyboard(key, key_state);
+        let new_input = &mut *(global_state.new_game_input).cast::<game::Input>();
+        let keyboard_controller = &mut new_input.controllers[0];
+        *keyboard_controller = game::ControllerInput::default();
+
+        let is_down = key_state == 1;
+        if key == unix::KeyCode::W as u32 {
+        } else if key == unix::KeyCode::A as u32 {
+        } else if key == unix::KeyCode::S as u32 {
+        } else if key == unix::KeyCode::D as u32 {
+        } else if key == unix::KeyCode::Q as u32 {
+            unix::process_keyboard_message(&mut keyboard_controller.left_shoulder, is_down);
+        } else if key == unix::KeyCode::E as u32 {
+            unix::process_keyboard_message(&mut keyboard_controller.right_shoulder, is_down);
+        } else if key == unix::KeyCode::UP as u32 {
+            unix::process_keyboard_message(&mut keyboard_controller.up, is_down);
+        } else if key == unix::KeyCode::LEFT as u32 {
+            unix::process_keyboard_message(&mut keyboard_controller.left, is_down);
+        } else if key == unix::KeyCode::DOWN as u32 {
+            unix::process_keyboard_message(&mut keyboard_controller.down, is_down);
+        } else if key == unix::KeyCode::RIGHT as u32 {
+            unix::process_keyboard_message(&mut keyboard_controller.right, is_down);
+        } else if key == unix::KeyCode::SPACE as u32 {
+        } else if key == unix::KeyCode::ESC as u32 {
+            global_state.running = false;
+        }
     }
 
     unsafe extern "C" fn keyboard_modifiers(
@@ -1104,7 +1054,7 @@ mod wl {
 }
 
 mod xdg {
-    use *;
+    use crate::{unix, wl};
 
     const XDG_WM_BASE_GET_XDG_SURFACE: u32 = 2;
     const XDG_WM_BASE_PONG: u32 = 3;
@@ -1293,7 +1243,7 @@ mod xdg {
 
     unsafe extern "C" fn toplevel_close(data: *mut std::ffi::c_void, _toplevel: *mut xdg_toplevel) {
         let global_state = &mut *data.cast::<unix::GlobalState>();
-        global_state.event = unix::EventType::Close;
+        global_state.running = false;
     }
 
     fn wm_pong(wm: *mut xdg_wm_base, serial: u32) {
@@ -1330,7 +1280,7 @@ mod xdg {
 }
 
 mod pw {
-    use *;
+    use crate::{game, pw, unix};
 
     const PW_VERSION_STREAM_EVENTS: u32 = 2;
 
@@ -1726,17 +1676,12 @@ mod pw {
         channels: std::ffi::c_uint,
         position: [std::ffi::c_uint; 64],
     }
-    #[allow(dead_code)]
     #[repr(C)]
     enum spa_audio_format {
-        S16 = 0x104,
         F32 = 0x11B,
-        S32 = 0x11C,
     }
-    #[allow(dead_code)]
     #[repr(C)]
     enum spa_direction {
-        Input,
         Output = 1,
     }
     enum StreamFlag {
@@ -1747,6 +1692,8 @@ mod pw {
 
 fn main() {
     let mut global_state: unix::GlobalState = unix::GlobalState::default();
+    global_state.buffer_released = true;
+    global_state.running = true;
     global_state.back_buffer.bytes_per_pixel = std::mem::size_of::<i32>() as i32;
 
     if let Some(display) = wl::display_connect("") {
@@ -1781,6 +1728,7 @@ fn main() {
         pw::loop_enter(sound_output.sound_loop);
 
         let mut inputs = [game::Input::default(); 2];
+        let [mut new_input, _] = &mut inputs;
 
         let mut last_timestamp = posix::clock_get_time().unwrap();
         let mut last_cycle_count = posix::cycle_get_count();
@@ -1807,102 +1755,36 @@ fn main() {
             transient_storage: transient_storage,
         };
 
-        loop {
-            let [mut new_input, mut old_input] = &mut inputs;
-            if wl::display_dispatch_pending_single(display) == -1 {
-                break;
-            }
-
-            match global_state.event {
-                unix::EventType::Close => break,
-                unix::EventType::Keyboard(key, key_state) => {
-                    let new_controller = &mut new_input.controllers[0];
-                    let old_controller = &mut old_input.controllers[0];
-
-                    if key == unix::KeyCode::W as u32 {
-                        unix::process_input_digital_button(
-                            &mut old_controller.up,
-                            key_state,
-                            &mut new_controller.up,
-                        );
-                    } else if key == unix::KeyCode::A as u32 {
-                        unix::process_input_digital_button(
-                            &mut old_controller.left,
-                            key_state,
-                            &mut new_controller.left,
-                        );
-                    } else if key == unix::KeyCode::S as u32 {
-                        unix::process_input_digital_button(
-                            &mut old_controller.down,
-                            key_state,
-                            &mut new_controller.down,
-                        );
-                    } else if key == unix::KeyCode::D as u32 {
-                        unix::process_input_digital_button(
-                            &mut old_controller.right,
-                            key_state,
-                            &mut new_controller.right,
-                        );
-                    } else if key == unix::KeyCode::Q as u32 {
-                        unix::process_input_digital_button(
-                            &mut old_controller.left_shoulder,
-                            key_state,
-                            &mut new_controller.left_shoulder,
-                        );
-                    } else if key == unix::KeyCode::E as u32 {
-                        unix::process_input_digital_button(
-                            &mut old_controller.right_shoulder,
-                            key_state,
-                            &mut new_controller.right_shoulder,
-                        );
-                    } else if key == unix::KeyCode::UP as u32 {
-                        unix::process_input_digital_button(
-                            &mut old_controller.up,
-                            key_state,
-                            &mut new_controller.up,
-                        );
-                    } else if key == unix::KeyCode::LEFT as u32 {
-                        unix::process_input_digital_button(
-                            &mut old_controller.left,
-                            key_state,
-                            &mut new_controller.left,
-                        );
-                    } else if key == unix::KeyCode::DOWN as u32 {
-                        unix::process_input_digital_button(
-                            &mut old_controller.down,
-                            key_state,
-                            &mut new_controller.down,
-                        );
-                    } else if key == unix::KeyCode::RIGHT as u32 {
-                        unix::process_input_digital_button(
-                            &mut old_controller.right,
-                            key_state,
-                            &mut new_controller.right,
-                        );
-                    } else if key == unix::KeyCode::SPACE as u32 {
-                    } else if key == unix::KeyCode::ESC as u32 {
-                    }
-
-                    inputs.swap(0, 1);
+        while global_state.running {
+            global_state.new_game_input = &mut new_input;
+            loop {
+                let dispatched_events = wl::display_dispatch_pending(display);
+                if dispatched_events == -1 {
+                    global_state.running = false;
+                    break;
+                } else if dispatched_events == 0 {
+                    break;
                 }
-                _ => {}
             }
 
-            if global_state.buffer_released {
-                let mut buffer = OffscreenBuffer {
+            pw::loop_iterate(sound_output.sound_loop);
+
+            if !global_state.buffer_released {
+                continue;
+            }
+
+            game::update_and_render(
+                &mut game_memory,
+                new_input,
+                game::OffscreenBuffer {
                     memory: global_state.back_buffer.memory.as_slice_mut(),
                     width: global_state.back_buffer.width,
                     height: global_state.back_buffer.height,
                     pitch: global_state.back_buffer.pitch,
                     bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
-                };
-                game::update_and_render(&mut game_memory, &mut new_input, &mut buffer);
-                unix::display_buffer_in_window(&mut global_state, 0, 0);
-            }
-
-            pw::loop_iterate(sound_output.sound_loop);
-
-            global_state.event = unix::EventType::None;
+                },
+            );
+            unix::display_buffer_in_window(&mut global_state, 0, 0);
 
             let end_cycle_count = posix::cycle_get_count();
             let end_timestamp = posix::clock_get_time().unwrap();
@@ -1915,6 +1797,8 @@ fn main() {
 
             last_cycle_count = end_cycle_count;
             last_timestamp = end_timestamp;
+
+            inputs.swap(0, 1);
         }
 
         pw::loop_leave(sound_output.sound_loop);
