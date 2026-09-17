@@ -1,5 +1,3 @@
-include!("handmade.rs");
-
 macro_rules! kilobytes {
     ($value:expr) => {
         $value * 1024
@@ -21,35 +19,37 @@ macro_rules! terabytes {
     };
 }
 
+include!("handmade.rs");
+
 #[cfg(HANDMADE_INTERNAL)]
 pub mod debug_platform {
-    use crate::posix;
+    use crate::sys;
 
     pub fn read_entire_file(filename: &str) -> Option<(*mut (), i64)> {
         assert!(filename.ends_with('\0'));
         unsafe {
-            let fd = posix::open(
+            let fd = sys::open(
                 filename.as_ptr() as *const std::ffi::c_void,
-                posix::O_RDONLY,
-                posix::S_IRUSR | posix::S_IRGRP | posix::S_IROTH,
+                sys::O_RDONLY,
+                sys::S_IRUSR | sys::S_IRGRP | sys::S_IROTH,
             );
             if fd != -1 {
-                let size = posix::lseek(fd, 0, posix::SEEK_END);
+                let size = sys::lseek(fd, 0, sys::SEEK_END);
                 if size != -1 {
-                    let result = posix::mmap(
+                    let result = sys::mmap(
                         std::ptr::null_mut(),
                         size as usize,
-                        posix::PROT_READ,
-                        posix::MAP_PRIVATE,
+                        sys::PROT_READ,
+                        sys::MAP_PRIVATE,
                         fd,
                         0,
                     ) as *mut ();
-                    if result as i32 != posix::MAP_FAILED {
+                    if result as i32 != sys::MAP_FAILED {
                         return Some((result, size));
                     }
                 } else {
                 }
-                posix::close(fd);
+                sys::close(fd);
             } else {
             }
         }
@@ -59,33 +59,33 @@ pub mod debug_platform {
     pub fn write_entire_file(filename: &str, memory: *mut (), memory_size: i64) -> bool {
         assert!(filename.ends_with('\0'));
         unsafe {
-            let fd = posix::open(
+            let fd = sys::open(
                 filename.as_ptr() as *const std::ffi::c_void,
-                posix::O_RDWR | posix::O_CREAT | posix::O_TRUNC,
-                posix::S_IRUSR | posix::S_IWUSR | posix::S_IRGRP | posix::S_IROTH,
+                sys::O_RDWR | sys::O_CREAT | sys::O_TRUNC,
+                sys::S_IRUSR | sys::S_IWUSR | sys::S_IRGRP | sys::S_IROTH,
             );
             if fd != -1 {
-                if posix::ftruncate(fd, memory_size) != -1 {
-                    let result = posix::mmap(
+                if sys::ftruncate(fd, memory_size) != -1 {
+                    let result = sys::mmap(
                         std::ptr::null_mut(),
                         memory_size as usize,
-                        posix::PROT_WRITE,
-                        posix::MAP_SHARED,
+                        sys::PROT_WRITE,
+                        sys::MAP_SHARED,
                         fd,
                         0,
                     ) as *mut ();
-                    if result as i32 != posix::MAP_FAILED {
+                    if result as i32 != sys::MAP_FAILED {
                         std::ptr::copy_nonoverlapping(
                             memory as *const u8,
                             result as *mut u8,
                             memory_size as usize,
                         );
-                        posix::munmap(result as *mut std::ffi::c_void, memory_size as usize);
+                        sys::munmap(result as *mut std::ffi::c_void, memory_size as usize);
                         return true;
                     } else {
                     }
                 }
-                posix::close(fd);
+                sys::close(fd);
             } else {
             }
         }
@@ -93,12 +93,12 @@ pub mod debug_platform {
     }
 
     pub fn free_file_memory(memory: *mut (), size: i64) {
-        unsafe { posix::munmap(memory as *mut std::ffi::c_void, size as usize) };
+        unsafe { sys::munmap(memory as *mut std::ffi::c_void, size as usize) };
     }
 }
 
-mod unix {
-    use crate::{game, posix, pw, unix, wl, xdg};
+mod linux {
+    use crate::{game, libevdev, pw, sys, wl, xdg};
 
     pub enum KeyCode {
         ESC = 1,
@@ -129,11 +129,11 @@ mod unix {
         pub window: *mut xdg::xdg_surface,
         pub toplevel: *mut xdg::xdg_toplevel,
 
-        pub new_game_input: *mut game::Input,
+        pub game_input: *mut game::Input,
 
         pub running: bool,
         pub buffer_released: bool,
-        pub back_buffer: unix::OffscreenBuffer,
+        pub back_buffer: OffscreenBuffer,
     }
 
     #[derive(Default)]
@@ -151,24 +151,24 @@ mod unix {
 
     #[derive(Default)]
     pub struct OffscreenBuffer {
-        pub memory: posix::MemFd,
+        pub memory: sys::MemFd,
         pub width: i32,
         pub height: i32,
         pub pitch: i32,
         pub bytes_per_pixel: i32,
     }
 
-    pub fn resize_shared_buffer(global_state: &mut unix::GlobalState, width: i32, height: i32) {
+    pub fn resize_shared_buffer(global_state: &mut GlobalState, width: i32, height: i32) {
         let buffer = &mut global_state.back_buffer;
         buffer.width = width;
         buffer.height = height;
         buffer.pitch = width * buffer.bytes_per_pixel;
         let bitmap_size = height * buffer.pitch;
         if !buffer.memory.is_null() {
-            posix::memfd_release(&mut buffer.memory);
+            sys::memfd_release(&mut buffer.memory);
         }
 
-        buffer.memory = posix::memfd_alloc("handmade_hero\0", bitmap_size as i64, 0).unwrap();
+        buffer.memory = sys::memfd_alloc("handmade_hero\0", bitmap_size as i64, 0).unwrap();
         let pool = wl::shm_create_pool(global_state.shm, buffer.memory.fd, bitmap_size);
         global_state.buffer = wl::shm_pool_create_buffer(
             pool,
@@ -182,7 +182,7 @@ mod unix {
         wl::buffer_add_listener(global_state.buffer, global_state);
     }
 
-    pub fn display_buffer_in_window(global_state: &mut unix::GlobalState, x: i32, y: i32) {
+    pub fn display_buffer_in_window(global_state: &mut GlobalState, x: i32, y: i32) {
         global_state.buffer_released = false;
         wl::surface_damage_buffer(
             global_state.surface,
@@ -196,13 +196,35 @@ mod unix {
     }
 
     pub fn process_keyboard_message(new_state: &mut game::ButtonState, is_down: bool) {
+        assert!(new_state.ended_down != is_down);
         new_state.ended_down = is_down;
         new_state.half_transition_count += 1;
     }
+
+    pub fn process_input_digital_button(
+        old_state: &game::ButtonState,
+        value: i32,
+        new_state: &mut game::ButtonState,
+    ) {
+        new_state.ended_down = value == 1;
+        new_state.half_transition_count = (old_state.ended_down != new_state.ended_down) as i32;
+    }
+
+    pub fn process_input_stick_value(controller: *mut libevdev::libevdev, code: u32) -> f32 {
+        let left_thump_deadzone = libevdev::get_controller_absinfo(controller, code) as i32;
+        let value = libevdev::get_controller_value(controller, libevdev::EV_ABS, libevdev::ABS_X);
+        if value < -left_thump_deadzone {
+            value as f32 / 32768.
+        } else if value > left_thump_deadzone {
+            value as f32 / 32767.
+        } else {
+            0.
+        }
+    }
 }
 
-mod posix {
-    use crate::posix;
+mod sys {
+    use crate::sys;
 
     pub const MFD_CLOEXEC: u32 = 0x0001;
 
@@ -215,10 +237,11 @@ mod posix {
 
     pub const CLOCK_MONOTONIC_RAW: i32 = 4;
 
-    pub const O_RDONLY: i32 = 0x000;
-    pub const O_RDWR: i32 = 0x002;
-    pub const O_CREAT: i32 = 0x040;
-    pub const O_TRUNC: i32 = 0x200;
+    pub const O_RDONLY: i32 = 0o00;
+    pub const O_RDWR: i32 = 0o02;
+    pub const O_CREAT: i32 = 0o0100;
+    pub const O_TRUNC: i32 = 0o01000;
+    pub const O_NONBLOCK: i32 = 0o04000;
 
     pub const S_IRUSR: i64 = 0o0400;
     pub const S_IWUSR: i64 = 0o0200;
@@ -246,20 +269,20 @@ mod posix {
     pub fn memfd_alloc(name: &str, size: i64, addr: usize) -> Option<MemFd> {
         assert!(!name.is_empty() && name.ends_with('\0'), "allocate_memory");
 
-        let fd = unsafe { posix::memfd_create(name.as_ptr() as *const i8, MFD_CLOEXEC) };
+        let fd = unsafe { sys::memfd_create(name.as_ptr() as *const i8, MFD_CLOEXEC) };
         if fd == -1 {
             println!("Failed to memfd_create");
             return None;
         }
 
-        let result = unsafe { posix::ftruncate(fd, size) };
+        let result = unsafe { sys::ftruncate(fd, size) };
         if result == -1 {
             println!("Failed to ftruncate");
             return None;
         }
 
         let addr = unsafe {
-            posix::mmap(
+            sys::mmap(
                 addr as *const std::ffi::c_void,
                 size as usize,
                 PROT_READ | PROT_WRITE,
@@ -281,8 +304,8 @@ mod posix {
     }
 
     pub fn memfd_release(memory: &mut MemFd) {
-        unsafe { posix::close(memory.fd) };
-        unsafe { posix::munmap(memory.addr as *mut std::ffi::c_void, memory.size as usize) };
+        unsafe { sys::close(memory.fd) };
+        unsafe { sys::munmap(memory.addr as *mut std::ffi::c_void, memory.size as usize) };
         *memory = MemFd::default();
     }
 
@@ -291,13 +314,12 @@ mod posix {
     }
 
     pub fn clock_get_time() -> Option<f64> {
-        let mut timespec = posix::timespec {
+        let mut timespec = sys::timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
         unsafe {
-            if posix::clock_gettime(posix::CLOCK_MONOTONIC_RAW, std::ptr::addr_of_mut!(timespec))
-                == -1
+            if sys::clock_gettime(sys::CLOCK_MONOTONIC_RAW, std::ptr::addr_of_mut!(timespec)) == -1
             {
                 None
             } else {
@@ -355,10 +377,264 @@ mod posix {
         tv_sec: std::ffi::c_long,
         tv_nsec: std::ffi::c_long,
     }
+
+    #[link(name = "dl")]
+    unsafe extern "C" {
+        pub fn dlopen(
+            path: *const std::ffi::c_char,
+            flags: std::ffi::c_int,
+        ) -> *mut std::ffi::c_void;
+        pub fn dlsym(
+            handle: *mut std::ffi::c_void,
+            symbol: *const std::ffi::c_char,
+        ) -> *mut std::ffi::c_void;
+    }
+}
+
+mod libevdev {
+    use crate::sys;
+
+    macro_rules! evdev_symbol {
+        ($dev:expr, $lib:expr, $field:ident) => {
+            $dev.$field = std::mem::transmute::<*mut std::ffi::c_void, _>(sys::dlsym(
+                $lib,
+                concat!("libevdev_", stringify!($field), "\0").as_ptr() as *const i8,
+            ));
+        };
+    }
+
+    static mut LIBEVDEV: LibEvdev = LibEvdev {
+        new: libevdev_new_stub,
+        new_from_fd: libevdev_new_from_fd_stub,
+        has_event_code: libevdev_has_event_code_stub,
+        next_event: libevdev_next_event_stub,
+        get_event_value: libevdev_get_event_value_stub,
+        get_abs_info: libevdev_get_abs_info_stub,
+    };
+
+    const MAX_CONTROLLERS_COUNT: usize = 4;
+
+    pub const EV_KEY: u32 = 0x01;
+    pub const EV_ABS: u32 = 0x03;
+
+    pub const ABS_X: u32 = 0x00;
+    pub const ABS_Y: u32 = 0x01;
+    pub const ABS_HAT0Y: u32 = 0x11;
+    pub const ABS_HAT0X: u32 = 0x10;
+
+    pub const BTN_SOUTH: u32 = 0x130;
+    pub const BTN_EAST: u32 = 0x131;
+    pub const BTN_NORTH: u32 = 0x133;
+    pub const BTN_WEST: u32 = 0x134;
+
+    pub const BTN_TL: u32 = 0x136;
+    pub const BTN_TR: u32 = 0x137;
+    pub const BTN_SELECT: u32 = 0x13a;
+    pub const BTN_START: u32 = 0x13b;
+
+    pub fn load_libevdev() {
+        const RTLD_NOW: i32 = 0x00002;
+        unsafe {
+            let evdev_library = sys::dlopen("libevdev.so\0".as_ptr() as *const i8, RTLD_NOW);
+            if !evdev_library.is_null() {
+                evdev_symbol!(LIBEVDEV, evdev_library, new);
+                evdev_symbol!(LIBEVDEV, evdev_library, new_from_fd);
+                evdev_symbol!(LIBEVDEV, evdev_library, has_event_code);
+                evdev_symbol!(LIBEVDEV, evdev_library, next_event);
+                evdev_symbol!(LIBEVDEV, evdev_library, get_event_value);
+                evdev_symbol!(LIBEVDEV, evdev_library, get_abs_info);
+            }
+        }
+    }
+
+    pub fn get_controllers() -> [*mut libevdev; MAX_CONTROLLERS_COUNT] {
+        use std::io::Write;
+        let mut controllers = [std::ptr::null_mut() as *mut libevdev; MAX_CONTROLLERS_COUNT];
+        let mut controller_index = 0;
+
+        let mut buffer = [0u8; 256];
+        let mut event_index = 0;
+        while controller_index < MAX_CONTROLLERS_COUNT {
+            let mut cursor: &mut [u8] = &mut buffer;
+            if write!(cursor, "/dev/input/event{}\0", event_index).is_ok() {
+                unsafe {
+                    let fd = sys::open(
+                        buffer.as_ptr() as *const std::ffi::c_void,
+                        sys::O_RDONLY | sys::O_NONBLOCK,
+                        sys::S_IRUSR | sys::S_IRGRP,
+                    );
+                    if (LIBEVDEV.new_from_fd)(fd, controllers.as_mut_ptr().add(controller_index))
+                        >= 0
+                    {
+                        let has_shoulder_left = (LIBEVDEV.has_event_code)(
+                            controllers[controller_index],
+                            EV_KEY,
+                            BTN_TL,
+                        ) == 1;
+                        let has_start = (LIBEVDEV.has_event_code)(
+                            controllers[controller_index],
+                            EV_KEY,
+                            BTN_START,
+                        ) == 1;
+                        let has_left_joystick =
+                            (LIBEVDEV.has_event_code)(controllers[controller_index], EV_ABS, ABS_X)
+                                == 1;
+                        if has_shoulder_left && has_start && has_left_joystick {
+                            controller_index += 1;
+                        } else {
+                            sys::close(fd);
+                        }
+                    } else if std::io::Error::last_os_error().raw_os_error() == Some(2) {
+                        break;
+                    } else {
+                    }
+                }
+            } else {
+                break;
+            }
+            event_index += 1;
+        }
+
+        controllers
+    }
+
+    enum ReadFlag {
+        Sync = 1,
+        Normal,
+    }
+
+    enum ReadStatus {
+        Success,
+        Sync,
+        Eagain = -11,
+    }
+
+    pub fn get_controller_state(dev: *mut libevdev) -> Result<(), i32> {
+        let mut event = input_event::default();
+        unsafe {
+            let mut rc =
+                (LIBEVDEV.next_event)(dev, ReadFlag::Normal as u32, std::ptr::addr_of_mut!(event));
+            while rc == ReadStatus::Sync as i32 {
+                rc = (LIBEVDEV.next_event)(
+                    dev,
+                    ReadFlag::Sync as u32,
+                    std::ptr::addr_of_mut!(event),
+                );
+            }
+            if rc == ReadStatus::Eagain as i32 || rc == ReadStatus::Success as i32 {
+                Ok(())
+            } else {
+                Err(rc)
+            }
+        }
+    }
+
+    pub fn get_controller_value(dev: *mut libevdev, event_type: u32, code: u32) -> i32 {
+        unsafe { (LIBEVDEV.get_event_value)(dev, event_type, code) }
+    }
+
+    pub fn get_controller_absinfo(dev: *mut libevdev, code: u32) -> u32 {
+        unsafe {
+            let info = (LIBEVDEV.get_abs_info)(dev, code);
+            if info.is_null() {
+                0
+            } else {
+                (*info).flat
+            }
+        }
+    }
+
+    unsafe extern "C" fn libevdev_new_stub() -> *mut libevdev {
+        std::ptr::null_mut() as *mut libevdev
+    }
+    unsafe extern "C" fn libevdev_new_from_fd_stub(
+        _fd: std::ffi::c_int,
+        _dev: *mut *mut libevdev,
+    ) -> std::ffi::c_int {
+        -1
+    }
+    unsafe extern "C" fn libevdev_has_event_code_stub(
+        _dev: *const libevdev,
+        _type: std::ffi::c_uint,
+        _code: std::ffi::c_uint,
+    ) -> std::ffi::c_int {
+        -1
+    }
+    unsafe extern "C" fn libevdev_next_event_stub(
+        _dev: *const libevdev,
+        _type: std::ffi::c_uint,
+        _ev: *mut input_event,
+    ) -> std::ffi::c_int {
+        -1
+    }
+    unsafe extern "C" fn libevdev_get_event_value_stub(
+        _dev: *const libevdev,
+        _type: std::ffi::c_uint,
+        _code: std::ffi::c_uint,
+    ) -> std::ffi::c_int {
+        -1
+    }
+    unsafe extern "C" fn libevdev_get_abs_info_stub(
+        _dev: *const libevdev,
+        _type: std::ffi::c_uint,
+    ) -> *mut input_absinfo {
+        std::ptr::null_mut() as *mut input_absinfo
+    }
+
+    struct LibEvdev {
+        new: unsafe extern "C" fn() -> *mut libevdev,
+        new_from_fd: unsafe extern "C" fn(std::ffi::c_int, *mut *mut libevdev) -> std::ffi::c_int,
+        has_event_code: unsafe extern "C" fn(
+            *const libevdev,
+            std::ffi::c_uint,
+            std::ffi::c_uint,
+        ) -> std::ffi::c_int,
+        next_event: unsafe extern "C" fn(
+            *const libevdev,
+            std::ffi::c_uint,
+            *mut input_event,
+        ) -> std::ffi::c_int,
+        get_event_value: unsafe extern "C" fn(
+            *const libevdev,
+            std::ffi::c_uint,
+            std::ffi::c_uint,
+        ) -> std::ffi::c_int,
+        get_abs_info: unsafe extern "C" fn(*const libevdev, std::ffi::c_uint) -> *mut input_absinfo,
+    }
+
+    #[repr(C)]
+    pub struct libevdev {
+        _data: (),
+        _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    }
+    #[derive(Default)]
+    #[repr(C)]
+    pub struct timeval {
+        tv_sec: std::ffi::c_long,
+        tv_usec: std::ffi::c_long,
+    }
+    #[derive(Default)]
+    #[repr(C)]
+    pub struct input_event {
+        time: timeval,
+        type_: std::ffi::c_ushort,
+        code: std::ffi::c_ushort,
+        value: std::ffi::c_int,
+    }
+    #[derive(Default)]
+    #[repr(C)]
+    pub struct input_absinfo {
+        value: u32,
+        minimum: u32,
+        maximum: u32,
+        fuzz: u32,
+        flat: u32,
+        resolution: u32,
+    }
 }
 
 mod wl {
-    use crate::{game, posix, unix, wl, xdg};
+    use crate::{linux, sys, wl, xdg};
 
     const WL_DISPLAY_GET_REGISTRY: u32 = 1;
 
@@ -409,7 +685,7 @@ mod wl {
         unsafe { wl_display_disconnect(display) }
     }
 
-    pub fn display_dispatch_pending(display: *mut wl_display) -> i32 {
+    pub fn dispatch_pending_events(display: *mut wl_display) -> i32 {
         unsafe {
             while wl_display_prepare_read(display) != 0 {
                 wl_display_dispatch_pending(display);
@@ -417,16 +693,16 @@ mod wl {
             wl_display_flush(display);
 
             const POLLIN: i16 = 0x001;
-            let mut fds = posix::Pollfd {
+            let mut fds = sys::Pollfd {
                 fd: wl_display_get_fd(display),
                 events: POLLIN,
                 revents: 0,
             };
             let nfds = 1;
-            if posix::poll(&mut fds, nfds, 0) == -1 {
+            if sys::poll(&mut fds, nfds, 0) == -1 || fds.revents == 0 {
                 wl_display_cancel_read(display);
             } else {
-                // assert!(fds.revents == POLLIN, "{}", fds.revents);
+                assert!(fds.revents == POLLIN, "{}", fds.revents);
                 wl_display_read_events(display);
             }
 
@@ -453,21 +729,24 @@ mod wl {
         }
     }
 
-    pub fn registry_add_listener(registry: *mut wl_registry, global_state: *mut unix::GlobalState) {
+    pub fn registry_add_listener(
+        registry: *mut wl_registry,
+        global_state: *mut linux::GlobalState,
+    ) {
         unsafe {
             wl_proxy_add_listener(
                 registry as *mut wl_proxy,
-                std::ptr::addr_of_mut!(registry_listener).cast::<unix::ListenerImplementation>(),
+                std::ptr::addr_of_mut!(registry_listener).cast::<linux::ListenerImplementation>(),
                 global_state as *mut std::ffi::c_void,
             );
         }
     }
 
-    pub fn buffer_add_listener(buffer: *mut wl_buffer, global_state: *mut unix::GlobalState) {
+    pub fn buffer_add_listener(buffer: *mut wl_buffer, global_state: *mut linux::GlobalState) {
         unsafe {
             wl_proxy_add_listener(
                 buffer as *mut wl_proxy,
-                std::ptr::addr_of_mut!(buffer_listener).cast::<unix::ListenerImplementation>(),
+                std::ptr::addr_of_mut!(buffer_listener).cast::<linux::ListenerImplementation>(),
                 global_state as *mut std::ffi::c_void,
             );
         }
@@ -628,7 +907,7 @@ mod wl {
         ) -> *mut wl_proxy;
         pub fn wl_proxy_add_listener(
             proxy: *mut wl_proxy,
-            implementation: *mut unix::ListenerImplementation,
+            implementation: *mut linux::ListenerImplementation,
             data: *mut std::ffi::c_void,
         ) -> std::ffi::c_int;
 
@@ -846,7 +1125,7 @@ mod wl {
         interface: *const std::ffi::c_char,
         version: std::ffi::c_uint,
     ) {
-        let global_state = &mut *data.cast::<unix::GlobalState>();
+        let global_state = &mut *data.cast::<linux::GlobalState>();
         let interface = std::ffi::CStr::from_ptr(interface);
         if interface == std::ffi::CStr::from_ptr(wl_compositor_interface.name) {
             global_state.compositor =
@@ -861,17 +1140,17 @@ mod wl {
                     as *mut xdg::xdg_wm_base;
             xdg::wm_add_listener(
                 global_state.window_manager,
-                data.cast::<unix::GlobalState>(),
+                data.cast::<linux::GlobalState>(),
             );
         } else if interface == std::ffi::CStr::from_ptr(wl_seat_interface.name) {
             global_state.seat =
                 registry_bind(registry, name, &wl_seat_interface, version) as *mut wl::wl_seat;
-            seat_add_listener(global_state.seat, data.cast::<unix::GlobalState>());
+            seat_add_listener(global_state.seat, data.cast::<linux::GlobalState>());
         }
     }
 
     pub unsafe extern "C" fn buffer_release(data: *mut std::ffi::c_void, _buffer: *mut wl_buffer) {
-        let global_state = &mut *data.cast::<unix::GlobalState>();
+        let global_state = &mut *data.cast::<linux::GlobalState>();
         global_state.buffer_released = true;
     }
 
@@ -880,7 +1159,7 @@ mod wl {
         _seat: *mut wl_seat,
         capabilities: std::ffi::c_uint,
     ) {
-        let global_state = &mut *data.cast::<unix::GlobalState>();
+        let global_state = &mut *data.cast::<linux::GlobalState>();
         let has_keyboard = (capabilities & SeatCapability::KEYBOARD as u32) != 0;
         if has_keyboard && global_state.keyboard.is_null() {
             global_state.keyboard = seat_get_keyboard(global_state.seat);
@@ -932,31 +1211,35 @@ mod wl {
         key: std::ffi::c_uint,
         key_state: std::ffi::c_uint,
     ) {
-        let global_state = &mut *data.cast::<unix::GlobalState>();
-        let new_input = &mut *(global_state.new_game_input).cast::<game::Input>();
-        let keyboard_controller = &mut new_input.controllers[0];
-        *keyboard_controller = game::ControllerInput::default();
+        let global_state = &mut *data.cast::<linux::GlobalState>();
+        let keyboard_controller = &mut (*global_state.game_input).controllers[0];
+        keyboard_controller.is_connected = true;
 
         let is_down = key_state == 1;
-        if key == unix::KeyCode::W as u32 {
-        } else if key == unix::KeyCode::A as u32 {
-        } else if key == unix::KeyCode::S as u32 {
-        } else if key == unix::KeyCode::D as u32 {
-        } else if key == unix::KeyCode::Q as u32 {
-            unix::process_keyboard_message(&mut keyboard_controller.left_shoulder, is_down);
-        } else if key == unix::KeyCode::E as u32 {
-            unix::process_keyboard_message(&mut keyboard_controller.right_shoulder, is_down);
-        } else if key == unix::KeyCode::UP as u32 {
-            unix::process_keyboard_message(&mut keyboard_controller.up, is_down);
-        } else if key == unix::KeyCode::LEFT as u32 {
-            unix::process_keyboard_message(&mut keyboard_controller.left, is_down);
-        } else if key == unix::KeyCode::DOWN as u32 {
-            unix::process_keyboard_message(&mut keyboard_controller.down, is_down);
-        } else if key == unix::KeyCode::RIGHT as u32 {
-            unix::process_keyboard_message(&mut keyboard_controller.right, is_down);
-        } else if key == unix::KeyCode::SPACE as u32 {
-        } else if key == unix::KeyCode::ESC as u32 {
-            global_state.running = false;
+        if key == linux::KeyCode::W as u32 {
+            linux::process_keyboard_message(&mut keyboard_controller.move_up(), is_down);
+        } else if key == linux::KeyCode::A as u32 {
+            linux::process_keyboard_message(&mut keyboard_controller.move_left(), is_down);
+        } else if key == linux::KeyCode::S as u32 {
+            linux::process_keyboard_message(&mut keyboard_controller.move_down(), is_down);
+        } else if key == linux::KeyCode::D as u32 {
+            linux::process_keyboard_message(&mut keyboard_controller.move_right(), is_down);
+        } else if key == linux::KeyCode::Q as u32 {
+            linux::process_keyboard_message(&mut keyboard_controller.left_shoulder(), is_down);
+        } else if key == linux::KeyCode::E as u32 {
+            linux::process_keyboard_message(&mut keyboard_controller.right_shoulder(), is_down);
+        } else if key == linux::KeyCode::UP as u32 {
+            linux::process_keyboard_message(&mut keyboard_controller.action_up(), is_down);
+        } else if key == linux::KeyCode::LEFT as u32 {
+            linux::process_keyboard_message(&mut keyboard_controller.action_left(), is_down);
+        } else if key == linux::KeyCode::DOWN as u32 {
+            linux::process_keyboard_message(&mut keyboard_controller.action_down(), is_down);
+        } else if key == linux::KeyCode::RIGHT as u32 {
+            linux::process_keyboard_message(&mut keyboard_controller.action_right(), is_down);
+        } else if key == linux::KeyCode::SPACE as u32 {
+            linux::process_keyboard_message(&mut keyboard_controller.start(), is_down);
+        } else if key == linux::KeyCode::ESC as u32 {
+            linux::process_keyboard_message(&mut keyboard_controller.back(), is_down);
         }
     }
 
@@ -1002,11 +1285,11 @@ mod wl {
         }
     }
 
-    fn seat_add_listener(seat: *mut wl_seat, global_state: *mut unix::GlobalState) {
+    fn seat_add_listener(seat: *mut wl_seat, global_state: *mut linux::GlobalState) {
         unsafe {
             wl_proxy_add_listener(
                 seat as *mut wl_proxy,
-                std::ptr::addr_of_mut!(seat_listener).cast::<unix::ListenerImplementation>(),
+                std::ptr::addr_of_mut!(seat_listener).cast::<linux::ListenerImplementation>(),
                 global_state as *mut std::ffi::c_void,
             );
         }
@@ -1028,11 +1311,11 @@ mod wl {
         }
     }
 
-    fn keyboard_add_listener(keyboard: *mut wl_keyboard, global_state: *mut unix::GlobalState) {
+    fn keyboard_add_listener(keyboard: *mut wl_keyboard, global_state: *mut linux::GlobalState) {
         unsafe {
             wl_proxy_add_listener(
                 keyboard as *mut wl_proxy,
-                std::ptr::addr_of_mut!(keyboard_listener).cast::<unix::ListenerImplementation>(),
+                std::ptr::addr_of_mut!(keyboard_listener).cast::<linux::ListenerImplementation>(),
                 global_state as *mut std::ffi::c_void,
             );
         }
@@ -1054,7 +1337,7 @@ mod wl {
 }
 
 mod xdg {
-    use crate::{unix, wl};
+    use crate::{linux, wl};
 
     const XDG_WM_BASE_GET_XDG_SURFACE: u32 = 2;
     const XDG_WM_BASE_PONG: u32 = 3;
@@ -1064,21 +1347,21 @@ mod xdg {
 
     const XDG_TOPLEVEL_SET_TITLE: u32 = 2;
 
-    pub fn wm_add_listener(wm: *mut xdg_wm_base, global_state: *mut unix::GlobalState) {
+    pub fn wm_add_listener(wm: *mut xdg_wm_base, global_state: *mut linux::GlobalState) {
         unsafe {
             wl::wl_proxy_add_listener(
                 wm as *mut wl::wl_proxy,
-                std::ptr::addr_of_mut!(wm_listener).cast::<unix::ListenerImplementation>(),
+                std::ptr::addr_of_mut!(wm_listener).cast::<linux::ListenerImplementation>(),
                 global_state as *mut std::ffi::c_void,
             );
         }
     }
 
-    pub fn surface_add_listener(surface: *mut xdg_surface, global_state: *mut unix::GlobalState) {
+    pub fn surface_add_listener(surface: *mut xdg_surface, global_state: *mut linux::GlobalState) {
         unsafe {
             wl::wl_proxy_add_listener(
                 surface as *mut wl::wl_proxy,
-                std::ptr::addr_of_mut!(surface_listener).cast::<unix::ListenerImplementation>(),
+                std::ptr::addr_of_mut!(surface_listener).cast::<linux::ListenerImplementation>(),
                 global_state as *mut std::ffi::c_void,
             );
         }
@@ -1144,12 +1427,12 @@ mod xdg {
 
     pub fn toplevel_add_listener(
         toplevel: *mut xdg_toplevel,
-        global_state: *mut unix::GlobalState,
+        global_state: *mut linux::GlobalState,
     ) {
         unsafe {
             wl::wl_proxy_add_listener(
                 toplevel as *mut wl::wl_proxy,
-                std::ptr::addr_of_mut!(toplevel_listener).cast::<unix::ListenerImplementation>(),
+                std::ptr::addr_of_mut!(toplevel_listener).cast::<linux::ListenerImplementation>(),
                 global_state as *mut std::ffi::c_void,
             );
         }
@@ -1237,12 +1520,12 @@ mod xdg {
         height: std::ffi::c_int,
         _states: *mut wl::wl_array,
     ) {
-        let global_state = &mut *data.cast::<unix::GlobalState>();
-        unix::resize_shared_buffer(global_state, width, height);
+        let global_state = &mut *data.cast::<linux::GlobalState>();
+        linux::resize_shared_buffer(global_state, width, height);
     }
 
     unsafe extern "C" fn toplevel_close(data: *mut std::ffi::c_void, _toplevel: *mut xdg_toplevel) {
-        let global_state = &mut *data.cast::<unix::GlobalState>();
+        let global_state = &mut *data.cast::<linux::GlobalState>();
         global_state.running = false;
     }
 
@@ -1280,11 +1563,11 @@ mod xdg {
 }
 
 mod pw {
-    use crate::{game, pw, unix};
+    use crate::{game, linux, pw};
 
     const PW_VERSION_STREAM_EVENTS: u32 = 2;
 
-    pub fn init(sound_output: &mut unix::SoundOutput) {
+    pub fn init(sound_output: &mut linux::SoundOutput) {
         unsafe {
             pw_init(std::ptr::null_mut(), std::ptr::null_mut());
 
@@ -1334,7 +1617,7 @@ mod pw {
                 "handmade-stream\0".as_ptr() as *const i8,
                 pw_properties_new_dict(&properties as *const spa_dict),
                 std::ptr::addr_of_mut!(stream_events),
-                sound_output as *mut unix::SoundOutput as *mut std::ffi::c_void,
+                sound_output as *mut linux::SoundOutput as *mut std::ffi::c_void,
             );
 
             let params = [spa_format_audio_raw_build(
@@ -1460,7 +1743,7 @@ mod pw {
     }
 
     unsafe extern "C" fn on_processed(userdata: *mut std::ffi::c_void) {
-        let sound_output = &mut *userdata.cast::<unix::SoundOutput>();
+        let sound_output = &mut *userdata.cast::<linux::SoundOutput>();
 
         let playback_buffer = pw_stream_dequeue_buffer(sound_output.stream);
         if playback_buffer.is_null() {
@@ -1691,7 +1974,9 @@ mod pw {
 }
 
 fn main() {
-    let mut global_state: unix::GlobalState = unix::GlobalState::default();
+    libevdev::load_libevdev();
+
+    let mut global_state: linux::GlobalState = linux::GlobalState::default();
     global_state.buffer_released = true;
     global_state.running = true;
     global_state.back_buffer.bytes_per_pixel = std::mem::size_of::<i32>() as i32;
@@ -1712,9 +1997,9 @@ fn main() {
         xdg::toplevel_add_listener(global_state.toplevel, &mut global_state);
 
         wl::surface_commit(global_state.surface);
-        unix::resize_shared_buffer(&mut global_state, 1280, 720);
+        linux::resize_shared_buffer(&mut global_state, 1280, 720);
 
-        let mut sound_output = unix::SoundOutput {
+        let mut sound_output = linux::SoundOutput {
             samples_per_second: 48000,
             bytes_per_sample: 0,
             channels: 2,
@@ -1728,10 +2013,10 @@ fn main() {
         pw::loop_enter(sound_output.sound_loop);
 
         let mut inputs = [game::Input::default(); 2];
-        let [mut new_input, _] = &mut inputs;
-
-        let mut last_timestamp = posix::clock_get_time().unwrap();
-        let mut last_cycle_count = posix::cycle_get_count();
+        let controllers = libevdev::get_controllers();
+        let max_controller_count = controllers.iter().take_while(|dev| !dev.is_null()).count();
+        let max_controller_count =
+            std::cmp::min(max_controller_count, inputs[0].controllers.len() - 1);
 
         let permanent_storage_size = megabytes!(64);
         let transient_storage_size = gigabytes!(4);
@@ -1740,65 +2025,227 @@ fn main() {
         } else {
             0
         };
-        let mut allocated_memory = posix::memfd_alloc(
+        let allocated_memory = sys::memfd_alloc(
             "\0",
             permanent_storage_size + transient_storage_size,
             base_address,
-        )
-        .unwrap_or(posix::MemFd::default());
-        let (permanent_storage, transient_storage) = allocated_memory
-            .as_slice_mut()
-            .split_at_mut(permanent_storage_size as usize);
-        let mut game_memory = game::Memory {
-            is_initialized: false,
-            permanent_storage: permanent_storage,
-            transient_storage: transient_storage,
-        };
+        );
+        if let Some(mut allocated_memory) = allocated_memory {
+            let (permanent_storage, transient_storage) = allocated_memory
+                .as_slice_mut()
+                .split_at_mut(permanent_storage_size as usize);
+            let mut game_memory = game::Memory {
+                is_initialized: false,
+                permanent_storage: permanent_storage,
+                transient_storage: transient_storage,
+            };
 
-        while global_state.running {
-            global_state.new_game_input = &mut new_input;
-            loop {
-                let dispatched_events = wl::display_dispatch_pending(display);
-                if dispatched_events == -1 {
-                    global_state.running = false;
-                    break;
-                } else if dispatched_events == 0 {
-                    break;
+            let mut last_timestamp = sys::clock_get_time().unwrap();
+            let mut last_cycle_count = sys::cycle_get_count();
+
+            while global_state.running {
+                let [new_input, old_input] = &mut inputs;
+                global_state.game_input = &mut *new_input as *mut _;
+
+                let old_keyboard_controller = &old_input.controllers[0];
+                let new_keyboard_controller = &mut new_input.controllers[0];
+                *new_keyboard_controller = game::ControllerInput::default();
+                for (new_button, old_button) in new_keyboard_controller
+                    .buttons
+                    .iter_mut()
+                    .zip(&old_keyboard_controller.buttons)
+                {
+                    new_button.ended_down = old_button.ended_down;
                 }
+                new_keyboard_controller.is_connected = old_keyboard_controller.is_connected;
+
+                loop {
+                    let dispatched_events = wl::dispatch_pending_events(display);
+                    if dispatched_events == -1 {
+                        global_state.running = false;
+                        break;
+                    } else if global_state.buffer_released && dispatched_events == 0 {
+                        break;
+                    }
+                }
+
+                for controller_index in 0..max_controller_count {
+                    let our_controlle_index = controller_index + 1;
+                    let old_controller = &mut old_input.controllers[our_controlle_index];
+                    let new_controller = &mut new_input.controllers[our_controlle_index];
+
+                    if libevdev::get_controller_state(controllers[controller_index]).is_ok() {
+                        new_controller.is_connected = true;
+                        linux::process_input_digital_button(
+                            old_controller.action_up(),
+                            libevdev::get_controller_value(
+                                controllers[controller_index],
+                                libevdev::EV_KEY,
+                                libevdev::BTN_NORTH,
+                            ),
+                            new_controller.action_up(),
+                        );
+                        linux::process_input_digital_button(
+                            old_controller.action_down(),
+                            libevdev::get_controller_value(
+                                controllers[controller_index],
+                                libevdev::EV_KEY,
+                                libevdev::BTN_SOUTH,
+                            ),
+                            new_controller.action_down(),
+                        );
+                        linux::process_input_digital_button(
+                            old_controller.action_left(),
+                            libevdev::get_controller_value(
+                                controllers[controller_index],
+                                libevdev::EV_KEY,
+                                libevdev::BTN_WEST,
+                            ),
+                            new_controller.action_left(),
+                        );
+                        linux::process_input_digital_button(
+                            old_controller.action_right(),
+                            libevdev::get_controller_value(
+                                controllers[controller_index],
+                                libevdev::EV_KEY,
+                                libevdev::BTN_EAST,
+                            ),
+                            new_controller.action_right(),
+                        );
+                        linux::process_input_digital_button(
+                            old_controller.left_shoulder(),
+                            libevdev::get_controller_value(
+                                controllers[controller_index],
+                                libevdev::EV_KEY,
+                                libevdev::BTN_TL,
+                            ),
+                            new_controller.left_shoulder(),
+                        );
+                        linux::process_input_digital_button(
+                            old_controller.right_shoulder(),
+                            libevdev::get_controller_value(
+                                controllers[controller_index],
+                                libevdev::EV_KEY,
+                                libevdev::BTN_TR,
+                            ),
+                            new_controller.right_shoulder(),
+                        );
+                        linux::process_input_digital_button(
+                            old_controller.start(),
+                            libevdev::get_controller_value(
+                                controllers[controller_index],
+                                libevdev::EV_KEY,
+                                libevdev::BTN_NORTH,
+                            ),
+                            new_controller.start(),
+                        );
+                        linux::process_input_digital_button(
+                            old_controller.back(),
+                            libevdev::get_controller_value(
+                                controllers[controller_index],
+                                libevdev::EV_KEY,
+                                libevdev::BTN_SELECT,
+                            ),
+                            new_controller.back(),
+                        );
+
+                        new_controller.is_analog = true;
+                        new_controller.stick_average_x = linux::process_input_stick_value(
+                            controllers[controller_index],
+                            libevdev::ABS_X,
+                        );
+                        new_controller.stick_average_y = linux::process_input_stick_value(
+                            controllers[controller_index],
+                            libevdev::ABS_Y,
+                        );
+                        if libevdev::get_controller_value(
+                            controllers[controller_index],
+                            libevdev::EV_ABS,
+                            libevdev::ABS_HAT0Y,
+                        ) == -1
+                        {
+                            new_controller.stick_average_y = 1.;
+                        }
+                        if libevdev::get_controller_value(
+                            controllers[controller_index],
+                            libevdev::EV_ABS,
+                            libevdev::ABS_HAT0Y,
+                        ) == 1
+                        {
+                            new_controller.stick_average_y = -1.;
+                        }
+                        if libevdev::get_controller_value(
+                            controllers[controller_index],
+                            libevdev::EV_ABS,
+                            libevdev::ABS_HAT0X,
+                        ) == -1
+                        {
+                            new_controller.stick_average_x = -1.;
+                        }
+                        if libevdev::get_controller_value(
+                            controllers[controller_index],
+                            libevdev::EV_ABS,
+                            libevdev::ABS_HAT0X,
+                        ) == 1
+                        {
+                            new_controller.stick_average_x = 1.;
+                        }
+
+                        let threshold = 0.5;
+                        linux::process_input_digital_button(
+                            old_controller.move_left(),
+                            (new_controller.stick_average_x < -threshold) as i32,
+                            new_controller.move_left(),
+                        );
+                        linux::process_input_digital_button(
+                            old_controller.move_right(),
+                            (new_controller.stick_average_x > threshold) as i32,
+                            new_controller.move_right(),
+                        );
+                        linux::process_input_digital_button(
+                            old_controller.move_up(),
+                            (new_controller.stick_average_y < -threshold) as i32,
+                            new_controller.move_up(),
+                        );
+                        linux::process_input_digital_button(
+                            old_controller.move_down(),
+                            (new_controller.stick_average_y > threshold) as i32,
+                            new_controller.move_down(),
+                        );
+                    } else {
+                        new_controller.is_connected = false;
+                    }
+                }
+
+                pw::loop_iterate(sound_output.sound_loop);
+
+                game::update_and_render(
+                    &mut game_memory,
+                    new_input.clone(),
+                    game::OffscreenBuffer {
+                        memory: global_state.back_buffer.memory.as_slice_mut(),
+                        width: global_state.back_buffer.width,
+                        height: global_state.back_buffer.height,
+                        pitch: global_state.back_buffer.pitch,
+                        bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
+                    },
+                );
+                linux::display_buffer_in_window(&mut global_state, 0, 0);
+
+                let end_cycle_count = sys::cycle_get_count();
+                let end_timestamp = sys::clock_get_time().unwrap();
+
+                let cycles_elapsed = end_cycle_count - last_cycle_count;
+                let ms_per_frame = (end_timestamp - last_timestamp) * 1e3;
+                let fps = 1e3 / ms_per_frame;
+                let mcpf = cycles_elapsed as f64 / 1e6;
+                println!("{:.02}ms/f, {:.02}f/s, {:.02}mc/f", ms_per_frame, fps, mcpf);
+
+                last_cycle_count = end_cycle_count;
+                last_timestamp = end_timestamp;
+
+                inputs.swap(0, 1);
             }
-
-            pw::loop_iterate(sound_output.sound_loop);
-
-            if !global_state.buffer_released {
-                continue;
-            }
-
-            game::update_and_render(
-                &mut game_memory,
-                new_input,
-                game::OffscreenBuffer {
-                    memory: global_state.back_buffer.memory.as_slice_mut(),
-                    width: global_state.back_buffer.width,
-                    height: global_state.back_buffer.height,
-                    pitch: global_state.back_buffer.pitch,
-                    bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
-                },
-            );
-            unix::display_buffer_in_window(&mut global_state, 0, 0);
-
-            let end_cycle_count = posix::cycle_get_count();
-            let end_timestamp = posix::clock_get_time().unwrap();
-
-            let cycles_elapsed = end_cycle_count - last_cycle_count;
-            let ms_per_frame = (end_timestamp - last_timestamp) * 1e3;
-            let fps = 1e3 / ms_per_frame;
-            let mcpf = cycles_elapsed as f64 / 1e6;
-            println!("{:.02}ms/f, {:.02}f/s, {:.02}mc/f", ms_per_frame, fps, mcpf);
-
-            last_cycle_count = end_cycle_count;
-            last_timestamp = end_timestamp;
-
-            inputs.swap(0, 1);
         }
 
         pw::loop_leave(sound_output.sound_loop);

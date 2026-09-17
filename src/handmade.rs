@@ -12,7 +12,7 @@ pub mod debug_platform {
 }
 
 pub mod game {
-    use *;
+    use crate::debug_platform;
 
     pub struct OffscreenBuffer<'a> {
         pub memory: &'a mut [u8],
@@ -36,17 +36,68 @@ pub mod game {
 
     #[derive(Default, Copy, Clone)]
     pub struct ControllerInput {
-        pub up: ButtonState,
-        pub down: ButtonState,
-        pub left: ButtonState,
-        pub right: ButtonState,
-        pub left_shoulder: ButtonState,
-        pub right_shoulder: ButtonState,
+        pub is_connected: bool,
+        pub is_analog: bool,
+        pub stick_average_x: f32,
+        pub stick_average_y: f32,
+        pub buttons: [ButtonState; 12],
+    }
+
+    impl ControllerInput {
+        const MOVE_UP: usize = 0;
+        const MOVE_DOWN: usize = 1;
+        const MOVE_LEFT: usize = 2;
+        const MOVE_RIGHT: usize = 3;
+        const ACTION_UP: usize = 4;
+        const ACTION_DOWN: usize = 5;
+        const ACTION_LEFT: usize = 6;
+        const ACTION_RIGHT: usize = 7;
+        const LEFT_SHOULDER: usize = 8;
+        const RIGHT_SHOULDER: usize = 9;
+        const START: usize = 10;
+        const BACK: usize = 11;
+
+        pub fn move_up(&mut self) -> &mut ButtonState {
+            &mut self.buttons[Self::MOVE_UP]
+        }
+        pub fn move_down(&mut self) -> &mut ButtonState {
+            &mut self.buttons[Self::MOVE_DOWN]
+        }
+        pub fn move_left(&mut self) -> &mut ButtonState {
+            &mut self.buttons[Self::MOVE_LEFT]
+        }
+        pub fn move_right(&mut self) -> &mut ButtonState {
+            &mut self.buttons[Self::MOVE_RIGHT]
+        }
+        pub fn action_up(&mut self) -> &mut ButtonState {
+            &mut self.buttons[Self::ACTION_UP]
+        }
+        pub fn action_down(&mut self) -> &mut ButtonState {
+            &mut self.buttons[Self::ACTION_DOWN]
+        }
+        pub fn action_left(&mut self) -> &mut ButtonState {
+            &mut self.buttons[Self::ACTION_LEFT]
+        }
+        pub fn action_right(&mut self) -> &mut ButtonState {
+            &mut self.buttons[Self::ACTION_RIGHT]
+        }
+        pub fn left_shoulder(&mut self) -> &mut ButtonState {
+            &mut self.buttons[Self::LEFT_SHOULDER]
+        }
+        pub fn right_shoulder(&mut self) -> &mut ButtonState {
+            &mut self.buttons[Self::RIGHT_SHOULDER]
+        }
+        pub fn start(&mut self) -> &mut ButtonState {
+            &mut self.buttons[Self::START]
+        }
+        pub fn back(&mut self) -> &mut ButtonState {
+            &mut self.buttons[Self::BACK]
+        }
     }
 
     #[derive(Default, Copy, Clone)]
     pub struct Input {
-        pub controllers: [ControllerInput; 1],
+        pub controllers: [ControllerInput; 5],
     }
 
     pub struct Memory<'a> {
@@ -69,7 +120,7 @@ pub mod game {
         blue_offset: i32,
     }
 
-    pub fn update_and_render(memory: &mut Memory, inputs: Input, buffer: OffscreenBuffer) {
+    pub fn update_and_render(memory: &mut Memory, mut inputs: Input, buffer: OffscreenBuffer) {
         if !memory.is_initialized {
             let game_state = memory.get_game_state();
             game_state.tone_hz = 256;
@@ -84,9 +135,22 @@ pub mod game {
         }
         let game_state = memory.get_game_state();
 
-        let input0 = &inputs.controllers[0];
-        if input0.down.ended_down {
-            game_state.green_offset += 4;
+        for controller in &mut inputs.controllers {
+            if controller.is_connected {
+                if controller.is_analog {
+                    game_state.blue_offset += (4. * controller.stick_average_x) as i32;
+                } else {
+                    if controller.move_left().ended_down {
+                        game_state.blue_offset -= 1;
+                    } else if controller.move_right().ended_down {
+                        game_state.blue_offset += 1;
+                    }
+                }
+
+                if controller.action_down().ended_down {
+                    game_state.green_offset += 1;
+                }
+            }
         }
 
         render_weird_gradient(
