@@ -221,6 +221,11 @@ mod linux {
             0.
         }
     }
+
+    pub fn get_seconds_elapsed(last_counter: sys::timespec, work_counter: sys::timespec) -> f64 {
+        work_counter.tv_sec as f64 - last_counter.tv_sec as f64 + work_counter.tv_nsec as f64 / 1e9
+            - last_counter.tv_nsec as f64 / 1e9
+    }
 }
 
 mod sys {
@@ -266,19 +271,17 @@ mod sys {
         }
     }
 
-    pub fn memfd_alloc(name: &str, size: i64, addr: usize) -> Option<MemFd> {
+    pub fn memfd_alloc(name: &str, size: i64, addr: usize) -> Result<MemFd, std::io::Error> {
         assert!(!name.is_empty() && name.ends_with('\0'), "allocate_memory");
 
         let fd = unsafe { sys::memfd_create(name.as_ptr() as *const i8, MFD_CLOEXEC) };
         if fd == -1 {
-            println!("Failed to memfd_create");
-            return None;
+            return Err(std::io::Error::last_os_error());
         }
 
         let result = unsafe { sys::ftruncate(fd, size) };
         if result == -1 {
-            println!("Failed to ftruncate");
-            return None;
+            return Err(std::io::Error::last_os_error());
         }
 
         let addr = unsafe {
@@ -292,11 +295,10 @@ mod sys {
             ) as *mut ()
         };
         if addr as i32 == MAP_FAILED {
-            println!("Failed to mmap");
-            return None;
+            return Err(std::io::Error::last_os_error());
         }
 
-        Some(MemFd {
+        Ok(MemFd {
             fd: fd,
             addr: addr as *mut u8,
             size: size as usize,
@@ -313,7 +315,7 @@ mod sys {
         unsafe { core::arch::x86_64::_rdtsc() }
     }
 
-    pub fn clock_get_time() -> Option<f64> {
+    pub fn get_wall_clock() -> Result<sys::timespec, std::io::Error> {
         let mut timespec = sys::timespec {
             tv_sec: 0,
             tv_nsec: 0,
@@ -321,11 +323,18 @@ mod sys {
         unsafe {
             if sys::clock_gettime(sys::CLOCK_MONOTONIC_RAW, std::ptr::addr_of_mut!(timespec)) == -1
             {
-                None
+                Err(std::io::Error::last_os_error())
             } else {
-                Some(timespec.tv_sec as f64 + timespec.tv_nsec as f64 / 1e9)
+                Ok(timespec)
             }
         }
+    }
+
+    pub fn sleep(sleep_ms: i32) {
+        let mut duration = timespec::default();
+        duration.tv_sec = sleep_ms as i64 / 1e3 as i64;
+        duration.tv_nsec = (sleep_ms as i64 - duration.tv_sec * 1e3 as i64) * 1e6 as i64;
+        unsafe { nanosleep(std::ptr::addr_of!(duration), std::ptr::null_mut()) };
     }
 
     #[link(name = "c")]
@@ -364,6 +373,11 @@ mod sys {
             offset: std::ffi::c_long,
             whence: std::ffi::c_int,
         ) -> std::ffi::c_long;
+
+        pub fn nanosleep(
+            requested_time: *const timespec,
+            remaning: *mut timespec,
+        ) -> std::ffi::c_int;
     }
 
     #[repr(C)]
@@ -372,10 +386,11 @@ mod sys {
         pub events: std::ffi::c_short,
         pub revents: std::ffi::c_short,
     }
+    #[derive(Default, Clone)]
     #[repr(C)]
-    struct timespec {
-        tv_sec: std::ffi::c_long,
-        tv_nsec: std::ffi::c_long,
+    pub struct timespec {
+        pub tv_sec: std::ffi::c_long,
+        pub tv_nsec: std::ffi::c_long,
     }
 
     #[link(name = "dl")]
@@ -1747,7 +1762,6 @@ mod pw {
 
         let playback_buffer = pw_stream_dequeue_buffer(sound_output.stream);
         if playback_buffer.is_null() {
-            println!("out of buffers");
             return;
         }
         let playback_buffer = &mut *playback_buffer;
@@ -1981,6 +1995,10 @@ fn main() {
     global_state.running = true;
     global_state.back_buffer.bytes_per_pixel = std::mem::size_of::<i32>() as i32;
 
+    let monitor_refresh_hz = 60;
+    let game_update_hz = monitor_refresh_hz / 2;
+    let target_seconds_per_frame = 1. / game_update_hz as f64;
+
     if let Some(display) = wl::display_connect("") {
         let registry = wl::display_get_registry(display);
         wl::registry_add_listener(registry, &mut global_state);
@@ -2030,7 +2048,7 @@ fn main() {
             permanent_storage_size + transient_storage_size,
             base_address,
         );
-        if let Some(mut allocated_memory) = allocated_memory {
+        if let Ok(mut allocated_memory) = allocated_memory {
             let (permanent_storage, transient_storage) = allocated_memory
                 .as_slice_mut()
                 .split_at_mut(permanent_storage_size as usize);
@@ -2040,7 +2058,7 @@ fn main() {
                 transient_storage: transient_storage,
             };
 
-            let mut last_timestamp = sys::clock_get_time().unwrap();
+            let mut last_timestamp = sys::get_wall_clock().unwrap();
             let mut last_cycle_count = sys::cycle_get_count();
 
             while global_state.running {
@@ -2230,21 +2248,41 @@ fn main() {
                         bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
                     },
                 );
-                linux::display_buffer_in_window(&mut global_state, 0, 0);
 
                 let end_cycle_count = sys::cycle_get_count();
-                let end_timestamp = sys::clock_get_time().unwrap();
+                let end_timestamp = sys::get_wall_clock().unwrap();
+
+                let work_seconds_elapsed =
+                    linux::get_seconds_elapsed(last_timestamp.clone(), end_timestamp);
+                let mut seconds_elapsed_for_frame = work_seconds_elapsed;
+                if seconds_elapsed_for_frame < target_seconds_per_frame {
+                    while seconds_elapsed_for_frame < target_seconds_per_frame {
+                        let sleep_ms = (target_seconds_per_frame - seconds_elapsed_for_frame) * 1e3;
+                        if sleep_ms > 0. {
+                            sys::sleep(sleep_ms as i32);
+                        }
+                        seconds_elapsed_for_frame = linux::get_seconds_elapsed(
+                            last_timestamp.clone(),
+                            sys::get_wall_clock().unwrap(),
+                        );
+                    }
+                } else {
+                }
+
+                linux::display_buffer_in_window(&mut global_state, 0, 0);
+                inputs.swap(0, 1);
 
                 let cycles_elapsed = end_cycle_count - last_cycle_count;
-                let ms_per_frame = (end_timestamp - last_timestamp) * 1e3;
+                let ms_per_frame = linux::get_seconds_elapsed(
+                    last_timestamp.clone(),
+                    sys::get_wall_clock().unwrap(),
+                ) * 1e3;
                 let fps = 1e3 / ms_per_frame;
                 let mcpf = cycles_elapsed as f64 / 1e6;
                 println!("{:.02}ms/f, {:.02}f/s, {:.02}mc/f", ms_per_frame, fps, mcpf);
 
                 last_cycle_count = end_cycle_count;
-                last_timestamp = end_timestamp;
-
-                inputs.swap(0, 1);
+                last_timestamp = sys::get_wall_clock().unwrap();
             }
         }
 
