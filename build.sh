@@ -12,6 +12,6 @@ wayland-scanner client-header ${XDG_LIB_PATH}/xdg-shell.xml xdg-shell-client-pro
 gcc -c xdg-shell-protocol.c -o xdg-shell-protocol.o
 ar rcs libxdg-shell-protocol.a xdg-shell-protocol.o
 
-rustc $COMPILER_FLAGS $LINK_FLAGS --out-dir . $ROOT/src/unix_handmade.rs
+rustc $COMPILER_FLAGS $LINK_FLAGS --out-dir . $ROOT/src/linux_handmade.rs
 
 popd >/dev/null

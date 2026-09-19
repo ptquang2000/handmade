@@ -5,5 +5,5 @@ edition = "2015"
 build = "build.rs"
 
 [[bin]]
-name = "unix_handmade"
-path = "src/unix_handmade.rs"
+name = "linux_handmade"
+path = "src/linux_handmade.rs"

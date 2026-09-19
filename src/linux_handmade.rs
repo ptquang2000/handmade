@@ -214,9 +214,9 @@ mod linux {
         let left_thump_deadzone = libevdev::get_controller_absinfo(controller, code) as i32;
         let value = libevdev::get_controller_value(controller, libevdev::EV_ABS, libevdev::ABS_X);
         if value < -left_thump_deadzone {
-            value as f32 / 32768.
+            value as f32 / i16::MIN as f32
         } else if value > left_thump_deadzone {
-            value as f32 / 32767.
+            value as f32 / -i16::MAX as f32
         } else {
             0.
         }
