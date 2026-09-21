@@ -22,6 +22,7 @@ pub mod game {
         pub bytes_per_pixel: i32,
     }
 
+    #[derive(Default)]
     pub struct SoundOutputBuffer<'a> {
         pub samples: &'a mut [u8],
         pub samples_per_second: u32,
@@ -120,7 +121,12 @@ pub mod game {
         blue_offset: i32,
     }
 
-    pub fn update_and_render(memory: &mut Memory, mut inputs: Input, buffer: OffscreenBuffer) {
+    pub fn update_and_render(
+        memory: &mut Memory,
+        mut inputs: Input,
+        buffer: OffscreenBuffer,
+        sound_buffer: &mut SoundOutputBuffer,
+    ) {
         if !memory.is_initialized {
             let game_state = memory.get_game_state();
             game_state.tone_hz = 256;
@@ -139,6 +145,7 @@ pub mod game {
             if controller.is_connected {
                 if controller.is_analog {
                     game_state.blue_offset += (4. * controller.stick_average_x) as i32;
+                    game_state.tone_hz += (i8::MIN as f32 * controller.stick_average_y) as i32;
                 } else {
                     if controller.move_left().ended_down {
                         game_state.blue_offset -= 1;
@@ -153,6 +160,7 @@ pub mod game {
             }
         }
 
+        output_sound(sound_buffer, game_state.tone_hz);
         render_weird_gradient(
             buffer.memory,
             buffer.pitch as usize,
@@ -162,7 +170,7 @@ pub mod game {
         );
     }
 
-    pub fn output_sound(sound_buffer: SoundOutputBuffer, tone_hz: u32) {
+    pub fn output_sound(sound_buffer: &mut SoundOutputBuffer, tone_hz: i32) {
         static mut T_SINE: f32 = 0.;
         let tone_volume = 0.2;
         let wave_period = sound_buffer.samples_per_second as f32 / tone_hz as f32;

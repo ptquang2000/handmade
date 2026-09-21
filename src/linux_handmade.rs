@@ -131,6 +131,8 @@ mod linux {
 
         pub game_input: *mut game::Input,
 
+        pub sound_output: SoundOutput,
+
         pub running: bool,
         pub buffer_released: bool,
         pub back_buffer: OffscreenBuffer,
@@ -138,13 +140,17 @@ mod linux {
 
     #[derive(Default)]
     pub struct SoundOutput {
-        pub samples_per_second: u32,
-        pub channels: u32,
-        pub bytes_per_sample: u32,
-        pub tone_hz: u32,
-        pub sound_main_loop: *mut pw::pw_main_loop,
+        pub samples_per_second: i32,
+        pub channels: i32,
+        pub bytes_per_sample: i32,
+        pub latency_sample_count: i32,
+
+        pub sound_main_loop: *mut pw::pw_thread_loop,
         pub sound_loop: *mut pw::pw_loop,
         pub stream: *mut pw::pw_stream,
+        pub ring: pw::spa_ringbuffer,
+        pub eventfd: i32,
+        pub memory: sys::MemFd,
     }
 
     pub type ListenerImplementation = unsafe extern "C" fn();
@@ -156,6 +162,12 @@ mod linux {
         pub height: i32,
         pub pitch: i32,
         pub bytes_per_pixel: i32,
+    }
+
+    #[derive(Default, Clone, Copy)]
+    pub struct DebugTimeMarker {
+        pub play_cursor: i64,
+        pub write_cursor: i64,
     }
 
     pub fn resize_shared_buffer(global_state: &mut GlobalState, width: i32, height: i32) {
@@ -225,6 +237,81 @@ mod linux {
     pub fn get_seconds_elapsed(last_counter: sys::timespec, work_counter: sys::timespec) -> f64 {
         work_counter.tv_sec as f64 - last_counter.tv_sec as f64 + work_counter.tv_nsec as f64 / 1e9
             - last_counter.tv_nsec as f64 / 1e9
+    }
+
+    pub fn debug_sync_display(
+        back_buffer: &mut OffscreenBuffer,
+        sound_output: &SoundOutput,
+        debug_time_markers: &[DebugTimeMarker],
+        _target_second_per_frame: f64,
+    ) {
+        let pad_x = 16;
+        let pad_y = 16;
+
+        let top = pad_y;
+        let bottom = back_buffer.height - pad_y;
+
+        let c = (back_buffer.width - 2 * pad_x) as f32 / sound_output.samples_per_second as f32;
+        for &debug_time_marker in debug_time_markers {
+            debug_draw_sound_buffer_marker(
+                back_buffer,
+                &sound_output,
+                c,
+                pad_x,
+                top,
+                bottom,
+                debug_time_marker.play_cursor as u32,
+                0xFFFFFFFF,
+            );
+            debug_draw_sound_buffer_marker(
+                back_buffer,
+                &sound_output,
+                c,
+                pad_x,
+                top,
+                bottom,
+                debug_time_marker.write_cursor as u32,
+                0xFFFF0000,
+            );
+        }
+    }
+
+    fn debug_draw_sound_buffer_marker(
+        back_buffer: &mut OffscreenBuffer,
+        sound_output: &SoundOutput,
+        c: f32,
+        pad_x: i32,
+        top: i32,
+        bottom: i32,
+        value: u32,
+        color: u32,
+    ) {
+        let x_f32 = c * (value % sound_output.samples_per_second as u32) as f32;
+        let x = pad_x + x_f32 as i32;
+        debug_draw_vertical(back_buffer, x, top, bottom, color);
+    }
+
+    fn debug_draw_vertical(
+        back_buffer: &mut OffscreenBuffer,
+        x: i32,
+        top: i32,
+        bottom: i32,
+        color: u32,
+    ) {
+        let rows = back_buffer
+            .memory
+            .as_slice_mut()
+            .chunks_exact_mut(back_buffer.pitch as usize)
+            .skip(top as usize)
+            .take((bottom - top) as usize);
+        for row in rows {
+            if let Some(pixel) = row
+                .chunks_exact_mut(back_buffer.bytes_per_pixel as usize)
+                .nth(x as usize)
+            {
+                pixel.copy_from_slice(&color.to_ne_bytes());
+            }
+        }
     }
 }
 
@@ -374,10 +461,7 @@ mod sys {
             whence: std::ffi::c_int,
         ) -> std::ffi::c_long;
 
-        pub fn nanosleep(
-            requested_time: *const timespec,
-            remaning: *mut timespec,
-        ) -> std::ffi::c_int;
+        fn nanosleep(requested_time: *const timespec, remaning: *mut timespec) -> std::ffi::c_int;
     }
 
     #[repr(C)]
@@ -700,7 +784,7 @@ mod wl {
         unsafe { wl_display_disconnect(display) }
     }
 
-    pub fn dispatch_pending_events(display: *mut wl_display) -> i32 {
+    pub fn dispatch_pending_events(display: *mut wl_display, timeout: i32) -> i32 {
         unsafe {
             while wl_display_prepare_read(display) != 0 {
                 wl_display_dispatch_pending(display);
@@ -714,7 +798,7 @@ mod wl {
                 revents: 0,
             };
             let nfds = 1;
-            if sys::poll(&mut fds, nfds, 0) == -1 || fds.revents == 0 {
+            if sys::poll(&mut fds, nfds, timeout) == -1 || fds.revents == 0 {
                 wl_display_cancel_read(display);
             } else {
                 assert!(fds.revents == POLLIN, "{}", fds.revents);
@@ -1465,6 +1549,8 @@ mod xdg {
     pub static mut toplevel_listener: xdg_toplevel_listener = xdg_toplevel_listener {
         configure: Some(toplevel_configure),
         close: Some(toplevel_close),
+        configure_bounds: Some(toplevel_configure_bounds),
+        wm_capabilities: Some(toplevel_wm_capabilities),
     };
 
     #[link(name = "xdg-shell-protocol", kind = "static")]
@@ -1510,6 +1596,17 @@ mod xdg {
             ),
         >,
         close: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut xdg_toplevel)>,
+        configure_bounds: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut xdg_toplevel,
+                std::ffi::c_int,
+                std::ffi::c_int,
+            ),
+        >,
+        wm_capabilities: Option<
+            unsafe extern "C" fn(*mut std::ffi::c_void, *mut xdg_toplevel, *mut wl::wl_array),
+        >,
     }
 
     unsafe extern "C" fn wm_ping(
@@ -1542,6 +1639,21 @@ mod xdg {
     unsafe extern "C" fn toplevel_close(data: *mut std::ffi::c_void, _toplevel: *mut xdg_toplevel) {
         let global_state = &mut *data.cast::<linux::GlobalState>();
         global_state.running = false;
+    }
+
+    unsafe extern "C" fn toplevel_configure_bounds(
+        _data: *mut std::ffi::c_void,
+        _toplevel: *mut xdg_toplevel,
+        _width: std::ffi::c_int,
+        _height: std::ffi::c_int,
+    ) {
+    }
+
+    unsafe extern "C" fn toplevel_wm_capabilities(
+        _data: *mut std::ffi::c_void,
+        _toplevel: *mut xdg_toplevel,
+        _capabilities: *mut wl::wl_array,
+    ) {
     }
 
     fn wm_pong(wm: *mut xdg_wm_base, serial: u32) {
@@ -1582,10 +1694,8 @@ mod pw {
 
     const PW_VERSION_STREAM_EVENTS: u32 = 2;
 
-    pub fn init(sound_output: &mut linux::SoundOutput) {
+    pub fn init(globle_state: &mut linux::GlobalState) {
         unsafe {
-            pw_init(std::ptr::null_mut(), std::ptr::null_mut());
-
             let mut pod_buffer = [0u8; 1024];
             let mut pod_builder = spa_pod_builder {
                 data: pod_buffer.as_mut_ptr() as *mut std::ffi::c_void,
@@ -1601,8 +1711,23 @@ mod pw {
                     data: std::ptr::null_mut(),
                 },
             };
-            sound_output.sound_main_loop = pw_main_loop_new(std::ptr::null_mut());
-            sound_output.sound_loop = pw_main_loop_get_loop(sound_output.sound_main_loop);
+
+            pw_init(std::ptr::null_mut(), std::ptr::null_mut());
+
+            globle_state.sound_output.sound_main_loop = pw_thread_loop_new(
+                "handmade-audio\0".as_ptr() as *const i8,
+                std::ptr::null_mut(),
+            );
+            globle_state.sound_output.sound_loop =
+                pw_thread_loop_get_loop(globle_state.sound_output.sound_main_loop);
+            pw_thread_loop_lock(globle_state.sound_output.sound_main_loop);
+
+            spa_ringbuffer_init(std::ptr::addr_of_mut!(globle_state.sound_output.ring));
+            const SPA_FD_NONBLOCK: i32 = 1 << 1;
+            globle_state.sound_output.eventfd = spa_system_eventfd_create(
+                (*globle_state.sound_output.sound_loop).system,
+                SPA_FD_NONBLOCK,
+            );
 
             let mut property_items = [
                 spa_dict_item {
@@ -1627,12 +1752,12 @@ mod pw {
                 n_items: property_items.len() as u32,
                 items: property_items.as_mut_ptr(),
             };
-            sound_output.stream = pw_stream_new_simple(
-                sound_output.sound_loop,
+            globle_state.sound_output.stream = pw_stream_new_simple(
+                globle_state.sound_output.sound_loop,
                 "handmade-stream\0".as_ptr() as *const i8,
                 pw_properties_new_dict(&properties as *const spa_dict),
                 std::ptr::addr_of_mut!(stream_events),
-                sound_output as *mut linux::SoundOutput as *mut std::ffi::c_void,
+                std::ptr::addr_of_mut!(globle_state.sound_output) as *mut std::ffi::c_void,
             );
 
             let params = [spa_format_audio_raw_build(
@@ -1641,33 +1766,74 @@ mod pw {
                 &spa_audio_info_raw {
                     format: spa_audio_format::F32,
                     flags: 0,
-                    channels: sound_output.channels,
-                    rate: sound_output.samples_per_second,
+                    channels: globle_state.sound_output.channels as u32,
+                    rate: globle_state.sound_output.samples_per_second as u32,
                     position: [0; 64],
                 },
             )];
 
             pw_stream_connect(
-                sound_output.stream,
+                globle_state.sound_output.stream,
                 spa_direction::Output,
                 0xffffffff,
                 StreamFlag::AutoConnect as u32 | StreamFlag::MapBuffers as u32,
                 params.as_ptr(),
                 params.len() as u32,
             );
+            pw_thread_loop_start(globle_state.sound_output.sound_main_loop);
+            pw_thread_loop_unlock(globle_state.sound_output.sound_main_loop);
         }
     }
 
-    pub fn loop_iterate(sound_loop: *mut pw_loop) {
-        unsafe { pw::pw_loop_iterate(sound_loop, 0) };
+    pub fn get_cursors(sound_output: &linux::SoundOutput) -> Option<(i64, i64)> {
+        let mut time = pw::pw_time::default();
+        if unsafe {
+            pw::pw_stream_get_time_n(
+                sound_output.stream,
+                std::ptr::addr_of_mut!(time),
+                std::mem::size_of_val(&time),
+            )
+        } == 0
+        {
+            let play_cursor = time.ticks as i64 - time.delay;
+            let write_cursor = (time.ticks + time.queued) as i64;
+            Some((play_cursor, write_cursor))
+        } else {
+            None
+        }
     }
 
-    pub fn loop_enter(sound_loop: *mut pw_loop) {
-        unsafe { pw::pw_loop_enter(sound_loop) };
+    pub fn ringbuffer_get_write_index(rbuf: &mut spa_ringbuffer, index: &mut u32) -> i32 {
+        unsafe { pw::spa_ringbuffer_get_write_index(rbuf as *mut _, index as *mut _) }
     }
 
-    pub fn loop_leave(sound_loop: *mut pw_loop) {
-        unsafe { pw::pw_loop_leave(sound_loop) };
+    pub fn ringbuffer_write_update(rbuf: &mut spa_ringbuffer, index: i32) {
+        unsafe { pw::spa_ringbuffer_write_update(rbuf as *mut _, index) }
+    }
+
+    pub fn fill_sound_buffer(
+        sound_output: &mut linux::SoundOutput,
+        write_index: u32,
+        sound_buffer: game::SoundOutputBuffer,
+    ) {
+        let secondary_buffer = sound_output.memory.as_slice_mut();
+        let secondary_buffer_size = secondary_buffer.len();
+        let bytes_to_write = sound_buffer.samples.len() as u32;
+
+        unsafe {
+            pw::spa_ringbuffer_write_data(
+                std::ptr::addr_of_mut!(sound_output.ring),
+                secondary_buffer.as_mut_ptr() as *mut std::ffi::c_void,
+                secondary_buffer_size as u32,
+                write_index as u32 % secondary_buffer_size as u32,
+                sound_buffer.samples.as_ptr() as *const std::ffi::c_void,
+                bytes_to_write,
+            );
+            pw::spa_ringbuffer_write_update(
+                std::ptr::addr_of_mut!(sound_output.ring),
+                write_index as i32 + bytes_to_write as i32,
+            )
+        };
     }
 
     #[no_mangle]
@@ -1688,7 +1854,7 @@ mod pw {
 
     #[repr(C)]
     pub struct pw_loop {
-        system: *mut spa_system,
+        pub system: *mut spa_system,
         wrapped_loop: *mut spa_loop,
         control: *mut spa_loop_control,
         utils: *mut spa_loop_utils,
@@ -1744,12 +1910,12 @@ mod pw {
         max_values: std::ffi::c_uint,
     }
     #[repr(C)]
-    struct pw_buffer {
-        buffer: *mut spa_buffer,
-        user_data: *mut std::ffi::c_void,
-        size: std::ffi::c_longlong,
-        requested: std::ffi::c_longlong,
-        time: std::ffi::c_longlong,
+    pub struct pw_buffer {
+        pub buffer: *mut spa_buffer,
+        pub user_data: *mut std::ffi::c_void,
+        pub size: std::ffi::c_longlong,
+        pub requested: std::ffi::c_longlong,
+        pub time: std::ffi::c_longlong,
     }
     #[repr(C)]
     pub struct pw_properties {
@@ -1757,52 +1923,70 @@ mod pw {
         flags: std::ffi::c_uint,
     }
 
-    unsafe extern "C" fn on_processed(userdata: *mut std::ffi::c_void) {
-        let sound_output = &mut *userdata.cast::<linux::SoundOutput>();
+    unsafe extern "C" fn on_processed(data: *mut std::ffi::c_void) {
+        let sound_output = &mut *data.cast::<linux::SoundOutput>();
 
-        let playback_buffer = pw_stream_dequeue_buffer(sound_output.stream);
-        if playback_buffer.is_null() {
+        let stream_buffer = pw::pw_stream_dequeue_buffer(sound_output.stream);
+        if stream_buffer.is_null() {
             return;
         }
-        let playback_buffer = &mut *playback_buffer;
 
+        let playback_buffer = &mut *stream_buffer;
         let buffers = std::slice::from_raw_parts_mut(
             (*playback_buffer.buffer).datas,
             (*playback_buffer.buffer).n_datas as usize,
         );
         if buffers.is_empty() || buffers[0].data.is_null() {
+            pw::pw_stream_return_buffer(sound_output.stream, stream_buffer);
             return;
         }
 
-        let buffer_size = (playback_buffer.requested.max(1) as u32 * sound_output.bytes_per_sample)
-            .min(buffers[0].maxsize);
-
-        game::output_sound(
-            game::SoundOutputBuffer {
-                samples: std::slice::from_raw_parts_mut(
-                    buffers[0].data as *mut u8,
-                    buffer_size as usize,
-                ),
-                samples_per_second: sound_output.samples_per_second,
-                bytes_per_sample: sound_output.bytes_per_sample,
-            },
-            sound_output.tone_hz,
+        let mut read_index = 0;
+        let bytes_to_read = spa_ringbuffer_get_read_index(
+            std::ptr::addr_of_mut!(sound_output.ring),
+            std::ptr::addr_of_mut!(read_index),
+        );
+        let target_bytes = (playback_buffer.requested as u32
+            * sound_output.bytes_per_sample as u32)
+            .min(buffers[0].maxsize)
+            .min(bytes_to_read.max(0) as u32);
+        let secondary_buffer = sound_output.memory.as_slice_mut();
+        spa_ringbuffer_read_data(
+            std::ptr::addr_of_mut!(sound_output.ring),
+            secondary_buffer.as_ptr() as *const std::ffi::c_void,
+            secondary_buffer.len() as u32,
+            read_index % secondary_buffer.len() as u32,
+            buffers[0].data,
+            target_bytes,
+        );
+        spa_ringbuffer_read_update(
+            std::ptr::addr_of_mut!(sound_output.ring),
+            (read_index + target_bytes) as i32,
         );
 
         let chunk = &mut *(buffers[0].chunk);
         chunk.offset = 0;
-        chunk.stride = sound_output.bytes_per_sample as i32;
-        chunk.size = buffer_size;
+        chunk.stride = sound_output.bytes_per_sample;
+        chunk.size = target_bytes;
 
-        pw_stream_queue_buffer(sound_output.stream, playback_buffer);
+        pw::pw_stream_queue_buffer(sound_output.stream, playback_buffer);
+        pw::spa_system_eventfd_write(
+            (*sound_output.sound_loop).system,
+            sound_output.eventfd,
+            playback_buffer.requested as u64,
+        );
     }
 
     #[link(name = "pipewire-0.3")]
     unsafe extern "C" {
         fn pw_init(argc: *mut std::ffi::c_int, argv: *mut *mut std::ffi::c_char);
 
-        fn pw_stream_dequeue_buffer(stream: *mut pw_stream) -> *mut pw_buffer;
-        fn pw_stream_queue_buffer(
+        pub fn pw_stream_dequeue_buffer(stream: *mut pw_stream) -> *mut pw_buffer;
+        pub fn pw_stream_queue_buffer(
+            stream: *mut pw_stream,
+            buffer: *mut pw_buffer,
+        ) -> std::ffi::c_int;
+        pub fn pw_stream_return_buffer(
             stream: *mut pw_stream,
             buffer: *mut pw_buffer,
         ) -> std::ffi::c_int;
@@ -1821,15 +2005,23 @@ mod pw {
             params: *const *mut spa_pod,
             n_params: std::ffi::c_uint,
         );
+        fn pw_stream_get_time_n(
+            stream: *mut pw_stream,
+            time: *mut pw_time,
+            size: usize,
+        ) -> std::ffi::c_int;
 
         fn pw_properties_new_dict(dict: *const spa_dict) -> *mut pw_properties;
 
-        fn pw_main_loop_new(props: *const spa_dict) -> *mut pw_main_loop;
-        fn pw_main_loop_get_loop(audio_loop: *mut pw_main_loop) -> *mut pw_loop;
+        fn pw_thread_loop_new(
+            name: *const std::ffi::c_char,
+            props: *const spa_dict,
+        ) -> *mut pw_thread_loop;
+        fn pw_thread_loop_get_loop(audio_loop: *mut pw_thread_loop) -> *mut pw_loop;
 
-        fn pw_loop_enter(object: *mut pw_loop);
-        fn pw_loop_leave(object: *mut pw_loop);
-        fn pw_loop_iterate(object: *mut pw_loop, timeout: std::ffi::c_int) -> std::ffi::c_int;
+        fn pw_thread_loop_start(object: *mut pw_thread_loop) -> std::ffi::c_int;
+        fn pw_thread_loop_lock(object: *mut pw_thread_loop);
+        fn pw_thread_loop_unlock(object: *mut pw_thread_loop);
     }
     #[derive(Default)]
     #[repr(C)]
@@ -1838,9 +2030,22 @@ mod pw {
         _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
     }
     #[repr(C)]
-    pub struct pw_main_loop {
+    pub struct pw_thread_loop {
         _data: (),
         _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    }
+    #[derive(Default)]
+    #[repr(C)]
+    struct pw_time {
+        now: std::ffi::c_longlong,
+        rate: spa_fraction,
+        ticks: std::ffi::c_ulonglong,
+        delay: std::ffi::c_longlong,
+        queued: std::ffi::c_ulonglong,
+        buffered: std::ffi::c_ulonglong,
+        queued_buffers: std::ffi::c_uint,
+        avail_buffers: std::ffi::c_uint,
+        size: std::ffi::c_ulonglong,
     }
 
     #[link(name = "spa")]
@@ -1850,6 +2055,49 @@ mod pw {
             id: std::ffi::c_uint,
             info: *const spa_audio_info_raw,
         ) -> *mut spa_pod;
+
+        fn spa_ringbuffer_init(rbuf: *mut spa_ringbuffer);
+        fn spa_ringbuffer_get_read_index(
+            rbuf: *mut spa_ringbuffer,
+            index: *mut std::ffi::c_uint,
+        ) -> std::ffi::c_int;
+        fn spa_ringbuffer_read_data(
+            rbuf: *mut spa_ringbuffer,
+            buffer: *const std::ffi::c_void,
+            size: std::ffi::c_uint,
+            offset: std::ffi::c_uint,
+            data: *mut std::ffi::c_void,
+            len: std::ffi::c_uint,
+        );
+        fn spa_ringbuffer_read_update(rbuf: *mut spa_ringbuffer, index: std::ffi::c_int);
+        fn spa_ringbuffer_get_write_index(
+            rbuf: *mut spa_ringbuffer,
+            index: *mut std::ffi::c_uint,
+        ) -> std::ffi::c_int;
+        fn spa_ringbuffer_write_data(
+            rbuf: *mut spa_ringbuffer,
+            buffer: *mut std::ffi::c_void,
+            size: std::ffi::c_uint,
+            offset: std::ffi::c_uint,
+            data: *const std::ffi::c_void,
+            len: std::ffi::c_uint,
+        );
+        fn spa_ringbuffer_write_update(rbuf: *mut spa_ringbuffer, index: std::ffi::c_int);
+
+        fn spa_system_eventfd_create(
+            object: *mut spa_system,
+            flags: std::ffi::c_int,
+        ) -> std::ffi::c_int;
+        fn _spa_system_eventfd_read(
+            object: *mut spa_system,
+            fd: std::ffi::c_int,
+            count: *mut std::ffi::c_ulonglong,
+        ) -> std::ffi::c_int;
+        fn spa_system_eventfd_write(
+            object: *mut spa_system,
+            fd: std::ffi::c_int,
+            count: std::ffi::c_ulonglong,
+        ) -> std::ffi::c_int;
     }
     #[repr(C)]
     struct spa_dict_item {
@@ -1896,34 +2144,34 @@ mod pw {
         id: std::ffi::c_uint,
     }
     #[repr(C)]
-    struct spa_buffer {
-        n_metas: std::ffi::c_uint,
-        n_datas: std::ffi::c_uint,
-        metas: *mut spa_meta,
-        datas: *mut spa_data,
+    pub struct spa_buffer {
+        pub n_metas: std::ffi::c_uint,
+        pub n_datas: std::ffi::c_uint,
+        pub metas: *mut spa_meta,
+        pub datas: *mut spa_data,
     }
     #[repr(C)]
-    struct spa_meta {
+    pub struct spa_meta {
         metadata_type: std::ffi::c_uint,
         size: std::ffi::c_uint,
         data: *mut std::ffi::c_void,
     }
     #[repr(C)]
-    struct spa_data {
-        data_type: std::ffi::c_uint,
-        flags: std::ffi::c_uint,
-        fd: std::ffi::c_longlong,
-        offset: std::ffi::c_uint,
-        maxsize: std::ffi::c_uint,
-        data: *mut std::ffi::c_void,
-        chunk: *mut spa_chunk,
+    pub struct spa_data {
+        pub data_type: std::ffi::c_uint,
+        pub flags: std::ffi::c_uint,
+        pub fd: std::ffi::c_longlong,
+        pub offset: std::ffi::c_uint,
+        pub maxsize: std::ffi::c_uint,
+        pub data: *mut std::ffi::c_void,
+        pub chunk: *mut spa_chunk,
     }
     #[repr(C)]
-    struct spa_chunk {
-        offset: std::ffi::c_uint,
-        size: std::ffi::c_uint,
-        stride: std::ffi::c_int,
-        flags: std::ffi::c_int,
+    pub struct spa_chunk {
+        pub offset: std::ffi::c_uint,
+        pub size: std::ffi::c_uint,
+        pub stride: std::ffi::c_int,
+        pub flags: std::ffi::c_int,
     }
     #[repr(C)]
     struct spa_command {
@@ -1985,6 +2233,18 @@ mod pw {
         AutoConnect = 1 << 0,
         MapBuffers = 1 << 2,
     }
+    #[derive(Default)]
+    #[repr(C)]
+    struct spa_fraction {
+        num: std::ffi::c_uint,
+        denom: std::ffi::c_uint,
+    }
+    #[derive(Default)]
+    #[repr(C)]
+    pub struct spa_ringbuffer {
+        readindex: std::ffi::c_uint,
+        writeindex: std::ffi::c_uint,
+    }
 }
 
 fn main() {
@@ -1995,9 +2255,10 @@ fn main() {
     global_state.running = true;
     global_state.back_buffer.bytes_per_pixel = std::mem::size_of::<i32>() as i32;
 
-    let monitor_refresh_hz = 60;
-    let game_update_hz = monitor_refresh_hz / 2;
-    let target_seconds_per_frame = 1. / game_update_hz as f64;
+    const MONITOR_REFRESH_HZ: usize = 60;
+    const GAME_UPDATE_HZ: usize = MONITOR_REFRESH_HZ / 2;
+    const FRAMES_OF_AUDIO_LATENCY: i32 = 3;
+    let target_seconds_per_frame = 1. / GAME_UPDATE_HZ as f64;
 
     if let Some(display) = wl::display_connect("") {
         let registry = wl::display_get_registry(display);
@@ -2017,24 +2278,34 @@ fn main() {
         wl::surface_commit(global_state.surface);
         linux::resize_shared_buffer(&mut global_state, 1280, 720);
 
-        let mut sound_output = linux::SoundOutput {
-            samples_per_second: 48000,
-            bytes_per_sample: 0,
-            channels: 2,
-            tone_hz: 256,
-            sound_main_loop: std::ptr::null_mut(),
-            sound_loop: std::ptr::null_mut(),
-            stream: std::ptr::null_mut(),
-        };
-        sound_output.bytes_per_sample = sound_output.channels * std::mem::size_of::<f32>() as u32;
-        pw::init(&mut sound_output);
-        pw::loop_enter(sound_output.sound_loop);
+        global_state.sound_output = linux::SoundOutput::default();
+        global_state.sound_output.samples_per_second = 48000;
+        global_state.sound_output.channels = 2;
+        global_state.sound_output.bytes_per_sample =
+            global_state.sound_output.channels * std::mem::size_of::<f32>() as i32;
+        global_state.sound_output.latency_sample_count = FRAMES_OF_AUDIO_LATENCY
+            * (global_state.sound_output.samples_per_second / GAME_UPDATE_HZ as i32);
+        global_state.sound_output.memory = sys::memfd_alloc(
+            "handmade_sound\0",
+            (global_state.sound_output.samples_per_second
+                * global_state.sound_output.bytes_per_sample) as i64,
+            0,
+        )
+        .unwrap();
+
+        let mut samples = sys::memfd_alloc(
+            "handmade-samples\0",
+            global_state.sound_output.memory.size as i64,
+            0,
+        )
+        .unwrap();
+
+        pw::init(&mut global_state);
 
         let mut inputs = [game::Input::default(); 2];
         let controllers = libevdev::get_controllers();
         let max_controller_count = controllers.iter().take_while(|dev| !dev.is_null()).count();
-        let max_controller_count =
-            std::cmp::min(max_controller_count, inputs[0].controllers.len() - 1);
+        let max_controller_count = max_controller_count.min(inputs[0].controllers.len() - 1);
 
         let permanent_storage_size = megabytes!(64);
         let transient_storage_size = gigabytes!(4);
@@ -2059,8 +2330,23 @@ fn main() {
             };
 
             let mut last_timestamp = sys::get_wall_clock().unwrap();
-            let mut last_cycle_count = sys::cycle_get_count();
+            let mut last_play_cursor = 0;
+            let mut sound_is_valid = false;
 
+            let mut debug_time_marker_index = 0;
+            let mut debug_time_markers = [linux::DebugTimeMarker::default(); GAME_UPDATE_HZ / 2];
+
+            global_state.running = true;
+
+            #[cfg(any())]
+            while global_state.running {
+                // NOTE: 256 samples latency
+                if let Some(cursors) = pw::get_cursors(&global_state.sound_output) {
+                    println!("PC:{} WC:{}", cursors.0, cursors.1);
+                }
+            }
+
+            let mut last_cycle_count = sys::cycle_get_count();
             while global_state.running {
                 let [new_input, old_input] = &mut inputs;
                 global_state.game_input = &mut *new_input as *mut _;
@@ -2078,12 +2364,13 @@ fn main() {
                 new_keyboard_controller.is_connected = old_keyboard_controller.is_connected;
 
                 loop {
-                    let dispatched_events = wl::dispatch_pending_events(display);
+                    let dispatched_events = wl::dispatch_pending_events(display, 0);
                     if dispatched_events == -1 {
                         global_state.running = false;
                         break;
                     } else if global_state.buffer_released && dispatched_events == 0 {
                         break;
+                    } else {
                     }
                 }
 
@@ -2235,21 +2522,71 @@ fn main() {
                     }
                 }
 
-                pw::loop_iterate(sound_output.sound_loop);
+                let mut sound_buffer = game::SoundOutputBuffer::default();
+                sound_buffer.samples_per_second =
+                    global_state.sound_output.samples_per_second as u32;
+                sound_buffer.bytes_per_sample = global_state.sound_output.bytes_per_sample as u32;
+
+                let mut write_index = 0;
+                let mut byte_to_lock = 0;
+                let mut target_cursor = 0;
+                let mut bytes_to_write = 0;
+                if sound_is_valid {
+                    let filled_bytes = pw::ringbuffer_get_write_index(
+                        &mut global_state.sound_output.ring,
+                        &mut write_index,
+                    );
+                    assert!(filled_bytes >= 0 && filled_bytes < samples.size as i32);
+                    byte_to_lock = (write_index % samples.size as u32) as i32;
+                    target_cursor = ((write_index as i32 - filled_bytes)
+                        + (global_state.sound_output.latency_sample_count
+                            * global_state.sound_output.bytes_per_sample))
+                        % samples.size as i32;
+                    if byte_to_lock as i32 > target_cursor {
+                        bytes_to_write = samples.size as i32 - byte_to_lock;
+                        bytes_to_write += target_cursor;
+                    } else {
+                        bytes_to_write = target_cursor - byte_to_lock;
+                    }
+                }
+                sound_buffer.samples = &mut samples.as_slice_mut()[..bytes_to_write as usize];
+
+                let buffer = game::OffscreenBuffer {
+                    memory: global_state.back_buffer.memory.as_slice_mut(),
+                    width: global_state.back_buffer.width,
+                    height: global_state.back_buffer.height,
+                    pitch: global_state.back_buffer.pitch,
+                    bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
+                };
 
                 game::update_and_render(
                     &mut game_memory,
                     new_input.clone(),
-                    game::OffscreenBuffer {
-                        memory: global_state.back_buffer.memory.as_slice_mut(),
-                        width: global_state.back_buffer.width,
-                        height: global_state.back_buffer.height,
-                        pitch: global_state.back_buffer.pitch,
-                        bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
-                    },
+                    buffer,
+                    &mut sound_buffer,
                 );
 
-                let end_cycle_count = sys::cycle_get_count();
+                if sound_is_valid {
+                    pw::fill_sound_buffer(
+                        &mut global_state.sound_output,
+                        write_index,
+                        sound_buffer,
+                    );
+
+                    #[cfg(HANDMADE_INTERNAL)]
+                    if let Some(cursors) = pw::get_cursors(&global_state.sound_output) {
+                        println!(
+                            "LPC:{} BTL:{} TC:{} BTW:{}, PC:{} WC:{}",
+                            last_play_cursor,
+                            byte_to_lock,
+                            target_cursor,
+                            bytes_to_write,
+                            cursors.0,
+                            cursors.1
+                        );
+                    }
+                }
+
                 let end_timestamp = sys::get_wall_clock().unwrap();
 
                 let work_seconds_elapsed =
@@ -2267,26 +2604,60 @@ fn main() {
                         );
                     }
                 } else {
+                    // assert!(false, "miss a frame");
                 }
 
+                let end_cycle_count = sys::cycle_get_count();
+                let end_timestamp = sys::get_wall_clock().unwrap();
+
+                #[cfg(HANDMADE_INTERNAL)]
+                linux::debug_sync_display(
+                    &mut global_state.back_buffer,
+                    &global_state.sound_output,
+                    &debug_time_markers,
+                    target_seconds_per_frame,
+                );
+
                 linux::display_buffer_in_window(&mut global_state, 0, 0);
+
+                let mut cursors = (0, 0);
+                if let Some(result) = pw::get_cursors(&global_state.sound_output) {
+                    cursors = result;
+                    last_play_cursor = cursors.0;
+                    if !sound_is_valid {
+                        sound_is_valid = true;
+                        pw::ringbuffer_write_update(
+                            &mut global_state.sound_output.ring,
+                            cursors.1 as i32 * global_state.sound_output.bytes_per_sample,
+                        );
+                    }
+                } else {
+                    sound_is_valid = false;
+                }
+
+                #[cfg(HANDMADE_INTERNAL)]
+                {
+                    let marker = &mut debug_time_markers[debug_time_marker_index];
+                    marker.play_cursor = cursors.0;
+                    marker.write_cursor = cursors.1;
+                    debug_time_marker_index =
+                        (debug_time_marker_index + 1) % debug_time_markers.len();
+                }
+
                 inputs.swap(0, 1);
 
                 let cycles_elapsed = end_cycle_count - last_cycle_count;
-                let ms_per_frame = linux::get_seconds_elapsed(
-                    last_timestamp.clone(),
-                    sys::get_wall_clock().unwrap(),
-                ) * 1e3;
+                let ms_per_frame =
+                    linux::get_seconds_elapsed(last_timestamp.clone(), end_timestamp.clone()) * 1e3;
                 let fps = 1e3 / ms_per_frame;
                 let mcpf = cycles_elapsed as f64 / 1e6;
                 println!("{:.02}ms/f, {:.02}f/s, {:.02}mc/f", ms_per_frame, fps, mcpf);
 
                 last_cycle_count = end_cycle_count;
-                last_timestamp = sys::get_wall_clock().unwrap();
+                last_timestamp = end_timestamp;
             }
         }
 
-        pw::loop_leave(sound_output.sound_loop);
         wl::display_disconnect(display);
     } else {
         panic!("display_connect.");
