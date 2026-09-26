@@ -26,7 +26,7 @@ pub mod debug_platform {
     use crate::sys;
 
     pub fn read_entire_file(filename: &str) -> Option<(*mut (), i64)> {
-        assert!(filename.ends_with('\0'));
+        debug_assert!(filename.ends_with('\0'));
         unsafe {
             let fd = sys::open(
                 filename.as_ptr() as *const std::ffi::c_void,
@@ -57,7 +57,7 @@ pub mod debug_platform {
     }
 
     pub fn write_entire_file(filename: &str, memory: *mut (), memory_size: i64) -> bool {
-        assert!(filename.ends_with('\0'));
+        debug_assert!(filename.ends_with('\0'));
         unsafe {
             let fd = sys::open(
                 filename.as_ptr() as *const std::ffi::c_void,
@@ -105,6 +105,7 @@ mod linux {
         Q = 16,
         W = 17,
         E = 18,
+        P = 25,
         A = 30,
         S = 31,
         D = 32,
@@ -131,9 +132,8 @@ mod linux {
 
         pub game_input: *mut game::Input,
 
-        pub sound_output: SoundOutput,
-
         pub running: bool,
+        pub pause: bool,
         pub buffer_released: bool,
         pub back_buffer: OffscreenBuffer,
     }
@@ -141,16 +141,16 @@ mod linux {
     #[derive(Default)]
     pub struct SoundOutput {
         pub samples_per_second: i32,
-        pub channels: i32,
         pub bytes_per_sample: i32,
-        pub latency_sample_count: i32,
+        pub channels: i32,
+        pub safety_bytes: i32,
 
         pub sound_main_loop: *mut pw::pw_thread_loop,
         pub sound_loop: *mut pw::pw_loop,
         pub stream: *mut pw::pw_stream,
         pub ring: pw::spa_ringbuffer,
         pub eventfd: i32,
-        pub memory: sys::MemFd,
+        pub secondary_buffer: sys::MemFd,
     }
 
     pub type ListenerImplementation = unsafe extern "C" fn();
@@ -166,8 +166,14 @@ mod linux {
 
     #[derive(Default, Clone, Copy)]
     pub struct DebugTimeMarker {
-        pub play_cursor: i64,
-        pub write_cursor: i64,
+        pub output_play_cursor: u32,
+        pub output_write_cursor: u32,
+        pub output_location: u32,
+        pub output_byte_count: u32,
+        pub expected_flip_play_cursor: u32,
+
+        pub flip_play_cursor: u32,
+        pub flip_write_cursor: u32,
     }
 
     pub fn resize_shared_buffer(global_state: &mut GlobalState, width: i32, height: i32) {
@@ -208,7 +214,7 @@ mod linux {
     }
 
     pub fn process_keyboard_message(new_state: &mut game::ButtonState, is_down: bool) {
-        assert!(new_state.ended_down != is_down);
+        debug_assert!(new_state.ended_down != is_down);
         new_state.ended_down = is_down;
         new_state.half_transition_count += 1;
     }
@@ -242,43 +248,138 @@ mod linux {
     pub fn debug_sync_display(
         back_buffer: &mut OffscreenBuffer,
         sound_output: &SoundOutput,
+        current_marker_index: usize,
         debug_time_markers: &[DebugTimeMarker],
         _target_second_per_frame: f64,
     ) {
         let pad_x = 16;
         let pad_y = 16;
 
-        let top = pad_y;
-        let bottom = back_buffer.height - pad_y;
+        let line_height = 64;
 
-        let c = (back_buffer.width - 2 * pad_x) as f32 / sound_output.samples_per_second as f32;
-        for &debug_time_marker in debug_time_markers {
+        let c = (back_buffer.width - 2 * pad_x) as f32 / sound_output.secondary_buffer.size as f32;
+        for (marker_index, &debug_time_marker) in debug_time_markers.iter().enumerate() {
+            let play_color = 0xFFFFFFFF;
+            let write_color = 0xFFFF0000;
+            let expected_flip_color = 0xFFFFFF00;
+            let play_window_color = 0xFFFF00FF;
+
+            let mut top = pad_y;
+            let mut bottom = pad_y + line_height;
+            if marker_index == current_marker_index {
+                debug_assert!(
+                    debug_time_marker.output_play_cursor
+                        < sound_output.secondary_buffer.size as u32
+                );
+                debug_assert!(
+                    debug_time_marker.output_write_cursor
+                        < sound_output.secondary_buffer.size as u32
+                );
+                debug_assert!(
+                    debug_time_marker.output_location < sound_output.secondary_buffer.size as u32
+                );
+                debug_assert!(
+                    debug_time_marker.output_byte_count < sound_output.secondary_buffer.size as u32
+                );
+                debug_assert!(
+                    debug_time_marker.flip_play_cursor < sound_output.secondary_buffer.size as u32
+                );
+                debug_assert!(
+                    debug_time_marker.flip_write_cursor < sound_output.secondary_buffer.size as u32
+                );
+
+                top += line_height + pad_y;
+                bottom += line_height + pad_y;
+
+                let first_top = top;
+
+                debug_draw_sound_buffer_marker(
+                    back_buffer,
+                    c,
+                    pad_x,
+                    top,
+                    bottom,
+                    debug_time_marker.output_play_cursor,
+                    play_color,
+                );
+                debug_draw_sound_buffer_marker(
+                    back_buffer,
+                    c,
+                    pad_x,
+                    top,
+                    bottom,
+                    debug_time_marker.output_write_cursor,
+                    write_color,
+                );
+
+                top += line_height + pad_y;
+                bottom += line_height + pad_y;
+
+                debug_draw_sound_buffer_marker(
+                    back_buffer,
+                    c,
+                    pad_x,
+                    top,
+                    bottom,
+                    debug_time_marker.output_location,
+                    play_color,
+                );
+                debug_draw_sound_buffer_marker(
+                    back_buffer,
+                    c,
+                    pad_x,
+                    top,
+                    bottom,
+                    debug_time_marker.output_location + debug_time_marker.output_byte_count,
+                    write_color,
+                );
+
+                top += line_height + pad_y;
+                bottom += line_height + pad_y;
+
+                debug_draw_sound_buffer_marker(
+                    back_buffer,
+                    c,
+                    pad_x,
+                    first_top,
+                    bottom,
+                    debug_time_marker.expected_flip_play_cursor,
+                    expected_flip_color,
+                );
+            }
+
             debug_draw_sound_buffer_marker(
                 back_buffer,
-                &sound_output,
                 c,
                 pad_x,
                 top,
                 bottom,
-                debug_time_marker.play_cursor as u32,
-                0xFFFFFFFF,
+                debug_time_marker.flip_play_cursor,
+                play_color,
             );
             debug_draw_sound_buffer_marker(
                 back_buffer,
-                &sound_output,
                 c,
                 pad_x,
                 top,
                 bottom,
-                debug_time_marker.write_cursor as u32,
-                0xFFFF0000,
+                debug_time_marker.flip_play_cursor + 256 * sound_output.bytes_per_sample as u32,
+                play_window_color,
+            );
+            debug_draw_sound_buffer_marker(
+                back_buffer,
+                c,
+                pad_x,
+                top,
+                bottom,
+                debug_time_marker.flip_write_cursor,
+                write_color,
             );
         }
     }
 
     fn debug_draw_sound_buffer_marker(
         back_buffer: &mut OffscreenBuffer,
-        sound_output: &SoundOutput,
         c: f32,
         pad_x: i32,
         top: i32,
@@ -286,7 +387,7 @@ mod linux {
         value: u32,
         color: u32,
     ) {
-        let x_f32 = c * (value % sound_output.samples_per_second as u32) as f32;
+        let x_f32 = c * value as f32;
         let x = pad_x + x_f32 as i32;
         debug_draw_vertical(back_buffer, x, top, bottom, color);
     }
@@ -294,22 +395,27 @@ mod linux {
     fn debug_draw_vertical(
         back_buffer: &mut OffscreenBuffer,
         x: i32,
-        top: i32,
-        bottom: i32,
+        mut top: i32,
+        mut bottom: i32,
         color: u32,
     ) {
-        let rows = back_buffer
-            .memory
-            .as_slice_mut()
-            .chunks_exact_mut(back_buffer.pitch as usize)
-            .skip(top as usize)
-            .take((bottom - top) as usize);
-        for row in rows {
-            if let Some(pixel) = row
-                .chunks_exact_mut(back_buffer.bytes_per_pixel as usize)
-                .nth(x as usize)
-            {
-                pixel.copy_from_slice(&color.to_ne_bytes());
+        top = top.max(0);
+        bottom = bottom.min(back_buffer.height);
+
+        if x >= 0 && x < back_buffer.width {
+            let rows = back_buffer
+                .memory
+                .as_slice_mut()
+                .chunks_exact_mut(back_buffer.pitch as usize)
+                .skip(top as usize)
+                .take((bottom - top) as usize);
+            for row in rows {
+                if let Some(pixel) = row
+                    .chunks_exact_mut(back_buffer.bytes_per_pixel as usize)
+                    .nth(x as usize)
+                {
+                    pixel.copy_from_slice(&color.to_ne_bytes());
+                }
             }
         }
     }
@@ -359,7 +465,7 @@ mod sys {
     }
 
     pub fn memfd_alloc(name: &str, size: i64, addr: usize) -> Result<MemFd, std::io::Error> {
-        assert!(!name.is_empty() && name.ends_with('\0'), "allocate_memory");
+        debug_assert!(!name.is_empty() && name.ends_with('\0'), "allocate_memory");
 
         let fd = unsafe { sys::memfd_create(name.as_ptr() as *const i8, MFD_CLOEXEC) };
         if fd == -1 {
@@ -768,7 +874,7 @@ mod wl {
         let name = if sock_name.is_empty() {
             std::ptr::null()
         } else {
-            assert!(sock_name.ends_with('\0'));
+            debug_assert!(sock_name.ends_with('\0'));
             sock_name.as_ptr() as *const i8
         };
 
@@ -801,7 +907,7 @@ mod wl {
             if sys::poll(&mut fds, nfds, timeout) == -1 || fds.revents == 0 {
                 wl_display_cancel_read(display);
             } else {
-                assert!(fds.revents == POLLIN, "{}", fds.revents);
+                debug_assert!(fds.revents == POLLIN, "{}", fds.revents);
                 wl_display_read_events(display);
             }
 
@@ -1339,6 +1445,12 @@ mod wl {
             linux::process_keyboard_message(&mut keyboard_controller.start(), is_down);
         } else if key == linux::KeyCode::ESC as u32 {
             linux::process_keyboard_message(&mut keyboard_controller.back(), is_down);
+        } else if key == linux::KeyCode::P as u32 {
+            if is_down {
+                global_state.pause = !global_state.pause;
+            }
+        } else {
+            println!("key:{}", key);
         }
     }
 
@@ -1505,7 +1617,7 @@ mod xdg {
         let title_buf = if title.is_empty() {
             std::ptr::null()
         } else {
-            assert!(title.ends_with('\0'));
+            debug_assert!(title.ends_with('\0'));
             title.as_ptr() as *const i8
         };
 
@@ -1694,7 +1806,7 @@ mod pw {
 
     const PW_VERSION_STREAM_EVENTS: u32 = 2;
 
-    pub fn init(globle_state: &mut linux::GlobalState) {
+    pub fn init_pipewire_sound(sound_output: &mut linux::SoundOutput) {
         unsafe {
             let mut pod_buffer = [0u8; 1024];
             let mut pod_builder = spa_pod_builder {
@@ -1714,20 +1826,17 @@ mod pw {
 
             pw_init(std::ptr::null_mut(), std::ptr::null_mut());
 
-            globle_state.sound_output.sound_main_loop = pw_thread_loop_new(
+            sound_output.sound_main_loop = pw_thread_loop_new(
                 "handmade-audio\0".as_ptr() as *const i8,
                 std::ptr::null_mut(),
             );
-            globle_state.sound_output.sound_loop =
-                pw_thread_loop_get_loop(globle_state.sound_output.sound_main_loop);
-            pw_thread_loop_lock(globle_state.sound_output.sound_main_loop);
+            sound_output.sound_loop = pw_thread_loop_get_loop(sound_output.sound_main_loop);
+            pw_thread_loop_lock(sound_output.sound_main_loop);
 
-            spa_ringbuffer_init(std::ptr::addr_of_mut!(globle_state.sound_output.ring));
+            spa_ringbuffer_init(std::ptr::addr_of_mut!(sound_output.ring));
             const SPA_FD_NONBLOCK: i32 = 1 << 1;
-            globle_state.sound_output.eventfd = spa_system_eventfd_create(
-                (*globle_state.sound_output.sound_loop).system,
-                SPA_FD_NONBLOCK,
-            );
+            sound_output.eventfd =
+                spa_system_eventfd_create((*sound_output.sound_loop).system, SPA_FD_NONBLOCK);
 
             let mut property_items = [
                 spa_dict_item {
@@ -1752,52 +1861,60 @@ mod pw {
                 n_items: property_items.len() as u32,
                 items: property_items.as_mut_ptr(),
             };
-            globle_state.sound_output.stream = pw_stream_new_simple(
-                globle_state.sound_output.sound_loop,
+            sound_output.stream = pw_stream_new_simple(
+                sound_output.sound_loop,
                 "handmade-stream\0".as_ptr() as *const i8,
                 pw_properties_new_dict(&properties as *const spa_dict),
                 std::ptr::addr_of_mut!(stream_events),
-                std::ptr::addr_of_mut!(globle_state.sound_output) as *mut std::ffi::c_void,
+                sound_output as *mut linux::SoundOutput as *mut std::ffi::c_void,
             );
 
             let params = [spa_format_audio_raw_build(
                 &mut pod_builder,
                 spa_param_type::EnumFormat as u32,
                 &spa_audio_info_raw {
-                    format: spa_audio_format::F32,
+                    format: spa_audio_format::S16,
                     flags: 0,
-                    channels: globle_state.sound_output.channels as u32,
-                    rate: globle_state.sound_output.samples_per_second as u32,
+                    channels: sound_output.channels as u32,
+                    rate: sound_output.samples_per_second as u32,
                     position: [0; 64],
                 },
             )];
 
             pw_stream_connect(
-                globle_state.sound_output.stream,
+                sound_output.stream,
                 spa_direction::Output,
                 0xffffffff,
                 StreamFlag::AutoConnect as u32 | StreamFlag::MapBuffers as u32,
                 params.as_ptr(),
                 params.len() as u32,
             );
-            pw_thread_loop_start(globle_state.sound_output.sound_main_loop);
-            pw_thread_loop_unlock(globle_state.sound_output.sound_main_loop);
+            pw_thread_loop_start(sound_output.sound_main_loop);
+            pw_thread_loop_unlock(sound_output.sound_main_loop);
         }
     }
 
-    pub fn get_cursors(sound_output: &linux::SoundOutput) -> Option<(i64, i64)> {
-        let mut time = pw::pw_time::default();
+    pub fn get_current_position(sound_output: &linux::SoundOutput) -> Option<(u32, u32)> {
+        let mut time = pw_time::default();
         if unsafe {
-            pw::pw_stream_get_time_n(
+            pw_stream_get_time_n(
                 sound_output.stream,
                 std::ptr::addr_of_mut!(time),
                 std::mem::size_of_val(&time),
             )
         } == 0
         {
-            let play_cursor = time.ticks as i64 - time.delay;
-            let write_cursor = (time.ticks + time.queued) as i64;
-            Some((play_cursor, write_cursor))
+            let now = unsafe { pw_stream_get_nsec(sound_output.stream) };
+            let diff = (now as i64 - time.now) as f64;
+            let elapsed = (time.rate.denom as f64 * diff) / (time.rate.num as f64 * 1e9);
+            let play_cursor = time.ticks as f64 + elapsed - time.delay as f64;
+            let write_cursor = time.ticks + time.queued;
+            Some((
+                (play_cursor as i32 * sound_output.bytes_per_sample)
+                    .rem_euclid(sound_output.secondary_buffer.size as i32) as u32,
+                (write_cursor as i32 * sound_output.bytes_per_sample)
+                    .rem_euclid(sound_output.secondary_buffer.size as i32) as u32,
+            ))
         } else {
             None
         }
@@ -1816,7 +1933,7 @@ mod pw {
         write_index: u32,
         sound_buffer: game::SoundOutputBuffer,
     ) {
-        let secondary_buffer = sound_output.memory.as_slice_mut();
+        let secondary_buffer = sound_output.secondary_buffer.as_slice_mut();
         let secondary_buffer_size = secondary_buffer.len();
         let bytes_to_write = sound_buffer.samples.len() as u32;
 
@@ -1913,9 +2030,9 @@ mod pw {
     pub struct pw_buffer {
         pub buffer: *mut spa_buffer,
         pub user_data: *mut std::ffi::c_void,
-        pub size: std::ffi::c_longlong,
-        pub requested: std::ffi::c_longlong,
-        pub time: std::ffi::c_longlong,
+        pub size: std::ffi::c_ulonglong,
+        pub requested: std::ffi::c_ulonglong,
+        pub time: std::ffi::c_ulonglong,
     }
     #[repr(C)]
     pub struct pw_properties {
@@ -1950,7 +2067,7 @@ mod pw {
             * sound_output.bytes_per_sample as u32)
             .min(buffers[0].maxsize)
             .min(bytes_to_read.max(0) as u32);
-        let secondary_buffer = sound_output.memory.as_slice_mut();
+        let secondary_buffer = sound_output.secondary_buffer.as_slice_mut();
         spa_ringbuffer_read_data(
             std::ptr::addr_of_mut!(sound_output.ring),
             secondary_buffer.as_ptr() as *const std::ffi::c_void,
@@ -1968,6 +2085,7 @@ mod pw {
         chunk.offset = 0;
         chunk.stride = sound_output.bytes_per_sample;
         chunk.size = target_bytes;
+        playback_buffer.size = (target_bytes as i32 / sound_output.bytes_per_sample) as u64;
 
         pw::pw_stream_queue_buffer(sound_output.stream, playback_buffer);
         pw::spa_system_eventfd_write(
@@ -2010,6 +2128,7 @@ mod pw {
             time: *mut pw_time,
             size: usize,
         ) -> std::ffi::c_int;
+        fn pw_stream_get_nsec(stream: *mut pw_stream) -> std::ffi::c_ulonglong;
 
         fn pw_properties_new_dict(dict: *const spa_dict) -> *mut pw_properties;
 
@@ -2223,7 +2342,7 @@ mod pw {
     }
     #[repr(C)]
     enum spa_audio_format {
-        F32 = 0x11B,
+        S16 = 0x104,
     }
     #[repr(C)]
     enum spa_direction {
@@ -2250,14 +2369,13 @@ mod pw {
 fn main() {
     libevdev::load_libevdev();
 
-    let mut global_state: linux::GlobalState = linux::GlobalState::default();
+    let mut global_state = linux::GlobalState::default();
     global_state.buffer_released = true;
     global_state.running = true;
     global_state.back_buffer.bytes_per_pixel = std::mem::size_of::<i32>() as i32;
 
     const MONITOR_REFRESH_HZ: usize = 60;
     const GAME_UPDATE_HZ: usize = MONITOR_REFRESH_HZ / 2;
-    const FRAMES_OF_AUDIO_LATENCY: i32 = 3;
     let target_seconds_per_frame = 1. / GAME_UPDATE_HZ as f64;
 
     if let Some(display) = wl::display_connect("") {
@@ -2265,7 +2383,7 @@ fn main() {
         wl::registry_add_listener(registry, &mut global_state);
         wl::display_roundtrip(display);
 
-        assert!(!global_state.compositor.is_null());
+        debug_assert!(!global_state.compositor.is_null());
         global_state.surface = wl::compositor_create_surface(global_state.compositor);
         global_state.window =
             xdg::wm_get_xdg_surface(global_state.window_manager, global_state.surface);
@@ -2278,34 +2396,35 @@ fn main() {
         wl::surface_commit(global_state.surface);
         linux::resize_shared_buffer(&mut global_state, 1280, 720);
 
-        global_state.sound_output = linux::SoundOutput::default();
-        global_state.sound_output.samples_per_second = 48000;
-        global_state.sound_output.channels = 2;
-        global_state.sound_output.bytes_per_sample =
-            global_state.sound_output.channels * std::mem::size_of::<f32>() as i32;
-        global_state.sound_output.latency_sample_count = FRAMES_OF_AUDIO_LATENCY
-            * (global_state.sound_output.samples_per_second / GAME_UPDATE_HZ as i32);
-        global_state.sound_output.memory = sys::memfd_alloc(
+        let mut sound_output = linux::SoundOutput::default();
+        sound_output.samples_per_second = 48000;
+        sound_output.channels = 2;
+        sound_output.bytes_per_sample = sound_output.channels * std::mem::size_of::<i16>() as i32;
+        sound_output.secondary_buffer = sys::memfd_alloc(
             "handmade_sound\0",
-            (global_state.sound_output.samples_per_second
-                * global_state.sound_output.bytes_per_sample) as i64,
+            (sound_output.samples_per_second * sound_output.bytes_per_sample) as i64,
             0,
         )
         .unwrap();
-
+        sound_output.safety_bytes = ((sound_output.samples_per_second / GAME_UPDATE_HZ as i32) / 3)
+            * sound_output.bytes_per_sample;
         let mut samples = sys::memfd_alloc(
             "handmade-samples\0",
-            global_state.sound_output.memory.size as i64,
+            sound_output.secondary_buffer.size as i64,
             0,
         )
         .unwrap();
+        pw::init_pipewire_sound(&mut sound_output);
 
-        pw::init(&mut global_state);
+        global_state.running = true;
 
-        let mut inputs = [game::Input::default(); 2];
-        let controllers = libevdev::get_controllers();
-        let max_controller_count = controllers.iter().take_while(|dev| !dev.is_null()).count();
-        let max_controller_count = max_controller_count.min(inputs[0].controllers.len() - 1);
+        #[cfg(any())]
+        while global_state.running {
+            // NOTE: 256 samples latency
+            if let Some((play_cursor, write_cursor)) = pw::get_current_position(&sound_output) {
+                println!("PC:{} WC:{}", play_cursor, write_cursor);
+            }
+        }
 
         let permanent_storage_size = megabytes!(64);
         let transient_storage_size = gigabytes!(4);
@@ -2329,22 +2448,20 @@ fn main() {
                 transient_storage: transient_storage,
             };
 
-            let mut last_timestamp = sys::get_wall_clock().unwrap();
-            let mut last_play_cursor = 0;
-            let mut sound_is_valid = false;
+            let mut inputs = [game::Input::default(); 2];
+            let controllers = libevdev::get_controllers();
+            let max_controller_count = controllers.iter().take_while(|dev| !dev.is_null()).count();
+            let max_controller_count = max_controller_count.min(inputs[0].controllers.len() - 1);
+
+            let mut last_wall_clock = sys::get_wall_clock().unwrap();
+            let mut flip_wall_clock = sys::get_wall_clock().unwrap();
 
             let mut debug_time_marker_index = 0;
             let mut debug_time_markers = [linux::DebugTimeMarker::default(); GAME_UPDATE_HZ / 2];
 
-            global_state.running = true;
-
-            #[cfg(any())]
-            while global_state.running {
-                // NOTE: 256 samples latency
-                if let Some(cursors) = pw::get_cursors(&global_state.sound_output) {
-                    println!("PC:{} WC:{}", cursors.0, cursors.1);
-                }
-            }
+            let mut audio_latency_bytes;
+            let mut audio_latency_seconds;
+            let mut sound_is_valid = false;
 
             let mut last_cycle_count = sys::cycle_get_count();
             while global_state.running {
@@ -2374,287 +2491,335 @@ fn main() {
                     }
                 }
 
-                for controller_index in 0..max_controller_count {
-                    let our_controlle_index = controller_index + 1;
-                    let old_controller = &mut old_input.controllers[our_controlle_index];
-                    let new_controller = &mut new_input.controllers[our_controlle_index];
+                if !global_state.pause {
+                    for controller_index in 0..max_controller_count {
+                        let our_controlle_index = controller_index + 1;
+                        let old_controller = &mut old_input.controllers[our_controlle_index];
+                        let new_controller = &mut new_input.controllers[our_controlle_index];
 
-                    if libevdev::get_controller_state(controllers[controller_index]).is_ok() {
-                        new_controller.is_connected = true;
-                        linux::process_input_digital_button(
-                            old_controller.action_up(),
-                            libevdev::get_controller_value(
-                                controllers[controller_index],
-                                libevdev::EV_KEY,
-                                libevdev::BTN_NORTH,
-                            ),
-                            new_controller.action_up(),
-                        );
-                        linux::process_input_digital_button(
-                            old_controller.action_down(),
-                            libevdev::get_controller_value(
-                                controllers[controller_index],
-                                libevdev::EV_KEY,
-                                libevdev::BTN_SOUTH,
-                            ),
-                            new_controller.action_down(),
-                        );
-                        linux::process_input_digital_button(
-                            old_controller.action_left(),
-                            libevdev::get_controller_value(
-                                controllers[controller_index],
-                                libevdev::EV_KEY,
-                                libevdev::BTN_WEST,
-                            ),
-                            new_controller.action_left(),
-                        );
-                        linux::process_input_digital_button(
-                            old_controller.action_right(),
-                            libevdev::get_controller_value(
-                                controllers[controller_index],
-                                libevdev::EV_KEY,
-                                libevdev::BTN_EAST,
-                            ),
-                            new_controller.action_right(),
-                        );
-                        linux::process_input_digital_button(
-                            old_controller.left_shoulder(),
-                            libevdev::get_controller_value(
-                                controllers[controller_index],
-                                libevdev::EV_KEY,
-                                libevdev::BTN_TL,
-                            ),
-                            new_controller.left_shoulder(),
-                        );
-                        linux::process_input_digital_button(
-                            old_controller.right_shoulder(),
-                            libevdev::get_controller_value(
-                                controllers[controller_index],
-                                libevdev::EV_KEY,
-                                libevdev::BTN_TR,
-                            ),
-                            new_controller.right_shoulder(),
-                        );
-                        linux::process_input_digital_button(
-                            old_controller.start(),
-                            libevdev::get_controller_value(
-                                controllers[controller_index],
-                                libevdev::EV_KEY,
-                                libevdev::BTN_NORTH,
-                            ),
-                            new_controller.start(),
-                        );
-                        linux::process_input_digital_button(
-                            old_controller.back(),
-                            libevdev::get_controller_value(
-                                controllers[controller_index],
-                                libevdev::EV_KEY,
-                                libevdev::BTN_SELECT,
-                            ),
-                            new_controller.back(),
-                        );
+                        if libevdev::get_controller_state(controllers[controller_index]).is_ok() {
+                            new_controller.is_connected = true;
+                            linux::process_input_digital_button(
+                                old_controller.action_up(),
+                                libevdev::get_controller_value(
+                                    controllers[controller_index],
+                                    libevdev::EV_KEY,
+                                    libevdev::BTN_NORTH,
+                                ),
+                                new_controller.action_up(),
+                            );
+                            linux::process_input_digital_button(
+                                old_controller.action_down(),
+                                libevdev::get_controller_value(
+                                    controllers[controller_index],
+                                    libevdev::EV_KEY,
+                                    libevdev::BTN_SOUTH,
+                                ),
+                                new_controller.action_down(),
+                            );
+                            linux::process_input_digital_button(
+                                old_controller.action_left(),
+                                libevdev::get_controller_value(
+                                    controllers[controller_index],
+                                    libevdev::EV_KEY,
+                                    libevdev::BTN_WEST,
+                                ),
+                                new_controller.action_left(),
+                            );
+                            linux::process_input_digital_button(
+                                old_controller.action_right(),
+                                libevdev::get_controller_value(
+                                    controllers[controller_index],
+                                    libevdev::EV_KEY,
+                                    libevdev::BTN_EAST,
+                                ),
+                                new_controller.action_right(),
+                            );
+                            linux::process_input_digital_button(
+                                old_controller.left_shoulder(),
+                                libevdev::get_controller_value(
+                                    controllers[controller_index],
+                                    libevdev::EV_KEY,
+                                    libevdev::BTN_TL,
+                                ),
+                                new_controller.left_shoulder(),
+                            );
+                            linux::process_input_digital_button(
+                                old_controller.right_shoulder(),
+                                libevdev::get_controller_value(
+                                    controllers[controller_index],
+                                    libevdev::EV_KEY,
+                                    libevdev::BTN_TR,
+                                ),
+                                new_controller.right_shoulder(),
+                            );
+                            linux::process_input_digital_button(
+                                old_controller.start(),
+                                libevdev::get_controller_value(
+                                    controllers[controller_index],
+                                    libevdev::EV_KEY,
+                                    libevdev::BTN_NORTH,
+                                ),
+                                new_controller.start(),
+                            );
+                            linux::process_input_digital_button(
+                                old_controller.back(),
+                                libevdev::get_controller_value(
+                                    controllers[controller_index],
+                                    libevdev::EV_KEY,
+                                    libevdev::BTN_SELECT,
+                                ),
+                                new_controller.back(),
+                            );
 
-                        new_controller.is_analog = true;
-                        new_controller.stick_average_x = linux::process_input_stick_value(
-                            controllers[controller_index],
-                            libevdev::ABS_X,
-                        );
-                        new_controller.stick_average_y = linux::process_input_stick_value(
-                            controllers[controller_index],
-                            libevdev::ABS_Y,
-                        );
-                        if libevdev::get_controller_value(
-                            controllers[controller_index],
-                            libevdev::EV_ABS,
-                            libevdev::ABS_HAT0Y,
-                        ) == -1
-                        {
-                            new_controller.stick_average_y = 1.;
-                        }
-                        if libevdev::get_controller_value(
-                            controllers[controller_index],
-                            libevdev::EV_ABS,
-                            libevdev::ABS_HAT0Y,
-                        ) == 1
-                        {
-                            new_controller.stick_average_y = -1.;
-                        }
-                        if libevdev::get_controller_value(
-                            controllers[controller_index],
-                            libevdev::EV_ABS,
-                            libevdev::ABS_HAT0X,
-                        ) == -1
-                        {
-                            new_controller.stick_average_x = -1.;
-                        }
-                        if libevdev::get_controller_value(
-                            controllers[controller_index],
-                            libevdev::EV_ABS,
-                            libevdev::ABS_HAT0X,
-                        ) == 1
-                        {
-                            new_controller.stick_average_x = 1.;
-                        }
+                            new_controller.is_analog = true;
+                            new_controller.stick_average_x = linux::process_input_stick_value(
+                                controllers[controller_index],
+                                libevdev::ABS_X,
+                            );
+                            new_controller.stick_average_y = linux::process_input_stick_value(
+                                controllers[controller_index],
+                                libevdev::ABS_Y,
+                            );
+                            if libevdev::get_controller_value(
+                                controllers[controller_index],
+                                libevdev::EV_ABS,
+                                libevdev::ABS_HAT0Y,
+                            ) == -1
+                            {
+                                new_controller.stick_average_y = 1.;
+                            }
+                            if libevdev::get_controller_value(
+                                controllers[controller_index],
+                                libevdev::EV_ABS,
+                                libevdev::ABS_HAT0Y,
+                            ) == 1
+                            {
+                                new_controller.stick_average_y = -1.;
+                            }
+                            if libevdev::get_controller_value(
+                                controllers[controller_index],
+                                libevdev::EV_ABS,
+                                libevdev::ABS_HAT0X,
+                            ) == -1
+                            {
+                                new_controller.stick_average_x = -1.;
+                            }
+                            if libevdev::get_controller_value(
+                                controllers[controller_index],
+                                libevdev::EV_ABS,
+                                libevdev::ABS_HAT0X,
+                            ) == 1
+                            {
+                                new_controller.stick_average_x = 1.;
+                            }
 
-                        let threshold = 0.5;
-                        linux::process_input_digital_button(
-                            old_controller.move_left(),
-                            (new_controller.stick_average_x < -threshold) as i32,
-                            new_controller.move_left(),
-                        );
-                        linux::process_input_digital_button(
-                            old_controller.move_right(),
-                            (new_controller.stick_average_x > threshold) as i32,
-                            new_controller.move_right(),
-                        );
-                        linux::process_input_digital_button(
-                            old_controller.move_up(),
-                            (new_controller.stick_average_y < -threshold) as i32,
-                            new_controller.move_up(),
-                        );
-                        linux::process_input_digital_button(
-                            old_controller.move_down(),
-                            (new_controller.stick_average_y > threshold) as i32,
-                            new_controller.move_down(),
-                        );
-                    } else {
-                        new_controller.is_connected = false;
+                            let threshold = 0.5;
+                            linux::process_input_digital_button(
+                                old_controller.move_left(),
+                                (new_controller.stick_average_x < -threshold) as i32,
+                                new_controller.move_left(),
+                            );
+                            linux::process_input_digital_button(
+                                old_controller.move_right(),
+                                (new_controller.stick_average_x > threshold) as i32,
+                                new_controller.move_right(),
+                            );
+                            linux::process_input_digital_button(
+                                old_controller.move_up(),
+                                (new_controller.stick_average_y < -threshold) as i32,
+                                new_controller.move_up(),
+                            );
+                            linux::process_input_digital_button(
+                                old_controller.move_down(),
+                                (new_controller.stick_average_y > threshold) as i32,
+                                new_controller.move_down(),
+                            );
+                        } else {
+                            new_controller.is_connected = false;
+                        }
                     }
-                }
 
-                let mut sound_buffer = game::SoundOutputBuffer::default();
-                sound_buffer.samples_per_second =
-                    global_state.sound_output.samples_per_second as u32;
-                sound_buffer.bytes_per_sample = global_state.sound_output.bytes_per_sample as u32;
+                    let buffer = game::OffscreenBuffer {
+                        memory: global_state.back_buffer.memory.as_slice_mut(),
+                        width: global_state.back_buffer.width,
+                        height: global_state.back_buffer.height,
+                        pitch: global_state.back_buffer.pitch,
+                        bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
+                    };
 
-                let mut write_index = 0;
-                let mut byte_to_lock = 0;
-                let mut target_cursor = 0;
-                let mut bytes_to_write = 0;
-                if sound_is_valid {
-                    let filled_bytes = pw::ringbuffer_get_write_index(
-                        &mut global_state.sound_output.ring,
-                        &mut write_index,
-                    );
-                    assert!(filled_bytes >= 0 && filled_bytes < samples.size as i32);
-                    byte_to_lock = (write_index % samples.size as u32) as i32;
-                    target_cursor = ((write_index as i32 - filled_bytes)
-                        + (global_state.sound_output.latency_sample_count
-                            * global_state.sound_output.bytes_per_sample))
-                        % samples.size as i32;
-                    if byte_to_lock as i32 > target_cursor {
-                        bytes_to_write = samples.size as i32 - byte_to_lock;
-                        bytes_to_write += target_cursor;
+                    game::update_and_render(&mut game_memory, new_input.clone(), buffer);
+
+                    let audio_wall_clock = sys::get_wall_clock().unwrap();
+                    let from_begin_to_audio_seconds =
+                        linux::get_seconds_elapsed(flip_wall_clock.clone(), audio_wall_clock);
+
+                    if let Some((play_cursor, write_cursor)) =
+                        pw::get_current_position(&sound_output)
+                    {
+                        if !sound_is_valid {
+                            sound_is_valid = true;
+                            pw::ringbuffer_write_update(
+                                &mut sound_output.ring,
+                                write_cursor as i32,
+                            );
+                        }
+
+                        let mut running_byte_index = 0;
+                        let filled_bytes = pw::ringbuffer_get_write_index(
+                            &mut sound_output.ring,
+                            &mut running_byte_index,
+                        );
+                        debug_assert!(
+                            filled_bytes >= 0
+                                && filled_bytes < sound_output.secondary_buffer.size as i32
+                        );
+
+                        let byte_to_lock =
+                            running_byte_index % sound_output.secondary_buffer.size as u32;
+
+                        let expected_sound_bytes_per_frame =
+                            (sound_output.samples_per_second as u32 / GAME_UPDATE_HZ as u32)
+                                * sound_output.bytes_per_sample as u32;
+                        let seconds_left_until_flip =
+                            target_seconds_per_frame - from_begin_to_audio_seconds;
+                        let _expected_byte_until_flip = (seconds_left_until_flip
+                            / target_seconds_per_frame)
+                            * expected_sound_bytes_per_frame as f64;
+
+                        let expected_frame_boundary_byte =
+                            play_cursor + expected_sound_bytes_per_frame as u32;
+
+                        let mut safe_write_cursor = if write_cursor < play_cursor {
+                            play_cursor + sound_output.secondary_buffer.size as u32
+                        } else {
+                            write_cursor
+                        };
+                        debug_assert!(safe_write_cursor >= play_cursor);
+                        safe_write_cursor += sound_output.safety_bytes as u32;
+
+                        let audio_card_is_low_latency =
+                            safe_write_cursor < expected_frame_boundary_byte;
+
+                        let target_cursor = if audio_card_is_low_latency {
+                            expected_frame_boundary_byte + expected_sound_bytes_per_frame
+                        } else {
+                            write_cursor
+                                + expected_sound_bytes_per_frame
+                                + sound_output.safety_bytes as u32
+                        } % sound_output.secondary_buffer.size as u32;
+
+                        let bytes_to_write = if byte_to_lock > target_cursor {
+                            sound_output.secondary_buffer.size as u32 - byte_to_lock + target_cursor
+                        } else {
+                            target_cursor - byte_to_lock
+                        };
+                        debug_assert!(bytes_to_write % sound_output.bytes_per_sample as u32 == 0);
+
+                        let mut sound_buffer = game::SoundOutputBuffer::default();
+                        sound_buffer.samples_per_second = sound_output.samples_per_second;
+                        sound_buffer.bytes_per_sample = sound_output.bytes_per_sample;
+                        sound_buffer.samples =
+                            &mut samples.as_slice_mut()[..bytes_to_write as usize];
+                        game::get_sound_samples(&mut game_memory, &mut sound_buffer);
+
+                        #[cfg(HANDMADE_INTERNAL)]
+                        {
+                            let marker = &mut debug_time_markers[debug_time_marker_index];
+                            marker.output_play_cursor = play_cursor;
+                            marker.output_write_cursor = write_cursor;
+                            marker.output_location = byte_to_lock;
+                            marker.output_byte_count = bytes_to_write;
+                            marker.expected_flip_play_cursor = expected_frame_boundary_byte;
+
+                            let mut unwrapped_write_cursor = write_cursor;
+                            if unwrapped_write_cursor < play_cursor {
+                                unwrapped_write_cursor += sound_output.secondary_buffer.size as u32;
+                            }
+                            audio_latency_bytes = unwrapped_write_cursor - play_cursor;
+                            audio_latency_seconds = (audio_latency_bytes as f32
+                                / sound_output.bytes_per_sample as f32)
+                                / sound_output.samples_per_second as f32;
+
+                            println!(
+                                "BTL:{} TC:{} BTW:{}, PC:{} WC:{} DELTA:{} ({}s)",
+                                byte_to_lock,
+                                target_cursor,
+                                bytes_to_write,
+                                play_cursor,
+                                write_cursor,
+                                audio_latency_bytes,
+                                audio_latency_seconds
+                            );
+                        }
+                        pw::fill_sound_buffer(&mut sound_output, running_byte_index, sound_buffer);
                     } else {
-                        bytes_to_write = target_cursor - byte_to_lock;
+                        sound_is_valid = false;
                     }
-                }
-                sound_buffer.samples = &mut samples.as_slice_mut()[..bytes_to_write as usize];
 
-                let buffer = game::OffscreenBuffer {
-                    memory: global_state.back_buffer.memory.as_slice_mut(),
-                    width: global_state.back_buffer.width,
-                    height: global_state.back_buffer.height,
-                    pitch: global_state.back_buffer.pitch,
-                    bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
-                };
+                    let end_wall_clock = sys::get_wall_clock().unwrap();
 
-                game::update_and_render(
-                    &mut game_memory,
-                    new_input.clone(),
-                    buffer,
-                    &mut sound_buffer,
-                );
+                    let work_seconds_elapsed =
+                        linux::get_seconds_elapsed(last_wall_clock.clone(), end_wall_clock);
+                    let mut seconds_elapsed_for_frame = work_seconds_elapsed;
+                    if seconds_elapsed_for_frame < target_seconds_per_frame {
+                        while seconds_elapsed_for_frame < target_seconds_per_frame {
+                            let sleep_ms =
+                                (target_seconds_per_frame - seconds_elapsed_for_frame) * 1e3;
+                            if sleep_ms > 0. {
+                                sys::sleep(sleep_ms as i32);
+                            }
+                            seconds_elapsed_for_frame = linux::get_seconds_elapsed(
+                                last_wall_clock.clone(),
+                                sys::get_wall_clock().unwrap(),
+                            );
+                        }
+                    } else {
+                    }
 
-                if sound_is_valid {
-                    pw::fill_sound_buffer(
-                        &mut global_state.sound_output,
-                        write_index,
-                        sound_buffer,
-                    );
+                    let end_cycle_count = sys::cycle_get_count();
+                    let end_wall_clock = sys::get_wall_clock().unwrap();
 
                     #[cfg(HANDMADE_INTERNAL)]
-                    if let Some(cursors) = pw::get_cursors(&global_state.sound_output) {
-                        println!(
-                            "LPC:{} BTL:{} TC:{} BTW:{}, PC:{} WC:{}",
-                            last_play_cursor,
-                            byte_to_lock,
-                            target_cursor,
-                            bytes_to_write,
-                            cursors.0,
-                            cursors.1
-                        );
+                    linux::debug_sync_display(
+                        &mut global_state.back_buffer,
+                        &sound_output,
+                        (debug_time_marker_index as i64 - 1) as usize,
+                        &debug_time_markers,
+                        target_seconds_per_frame,
+                    );
+
+                    linux::display_buffer_in_window(&mut global_state, 0, 0);
+
+                    flip_wall_clock = sys::get_wall_clock().unwrap();
+                    #[cfg(HANDMADE_INTERNAL)]
+                    if let Some((play_cursor, write_cursor)) =
+                        pw::get_current_position(&sound_output)
+                    {
+                        let marker = &mut debug_time_markers[debug_time_marker_index];
+                        marker.flip_play_cursor = play_cursor;
+                        marker.flip_write_cursor = write_cursor;
+                    }
+
+                    inputs.swap(0, 1);
+
+                    let cycles_elapsed = end_cycle_count - last_cycle_count;
+                    let ms_per_frame =
+                        linux::get_seconds_elapsed(last_wall_clock.clone(), end_wall_clock.clone())
+                            * 1e3;
+                    let fps = 1e3 / ms_per_frame;
+                    let mcpf = cycles_elapsed as f64 / 1e6;
+                    println!("{:.02}ms/f, {:.02}f/s, {:.02}mc/f", ms_per_frame, fps, mcpf);
+
+                    last_cycle_count = end_cycle_count;
+                    last_wall_clock = end_wall_clock;
+
+                    #[cfg(HANDMADE_INTERNAL)]
+                    {
+                        debug_time_marker_index =
+                            (debug_time_marker_index + 1) % debug_time_markers.len();
                     }
                 }
-
-                let end_timestamp = sys::get_wall_clock().unwrap();
-
-                let work_seconds_elapsed =
-                    linux::get_seconds_elapsed(last_timestamp.clone(), end_timestamp);
-                let mut seconds_elapsed_for_frame = work_seconds_elapsed;
-                if seconds_elapsed_for_frame < target_seconds_per_frame {
-                    while seconds_elapsed_for_frame < target_seconds_per_frame {
-                        let sleep_ms = (target_seconds_per_frame - seconds_elapsed_for_frame) * 1e3;
-                        if sleep_ms > 0. {
-                            sys::sleep(sleep_ms as i32);
-                        }
-                        seconds_elapsed_for_frame = linux::get_seconds_elapsed(
-                            last_timestamp.clone(),
-                            sys::get_wall_clock().unwrap(),
-                        );
-                    }
-                } else {
-                    // assert!(false, "miss a frame");
-                }
-
-                let end_cycle_count = sys::cycle_get_count();
-                let end_timestamp = sys::get_wall_clock().unwrap();
-
-                #[cfg(HANDMADE_INTERNAL)]
-                linux::debug_sync_display(
-                    &mut global_state.back_buffer,
-                    &global_state.sound_output,
-                    &debug_time_markers,
-                    target_seconds_per_frame,
-                );
-
-                linux::display_buffer_in_window(&mut global_state, 0, 0);
-
-                let mut cursors = (0, 0);
-                if let Some(result) = pw::get_cursors(&global_state.sound_output) {
-                    cursors = result;
-                    last_play_cursor = cursors.0;
-                    if !sound_is_valid {
-                        sound_is_valid = true;
-                        pw::ringbuffer_write_update(
-                            &mut global_state.sound_output.ring,
-                            cursors.1 as i32 * global_state.sound_output.bytes_per_sample,
-                        );
-                    }
-                } else {
-                    sound_is_valid = false;
-                }
-
-                #[cfg(HANDMADE_INTERNAL)]
-                {
-                    let marker = &mut debug_time_markers[debug_time_marker_index];
-                    marker.play_cursor = cursors.0;
-                    marker.write_cursor = cursors.1;
-                    debug_time_marker_index =
-                        (debug_time_marker_index + 1) % debug_time_markers.len();
-                }
-
-                inputs.swap(0, 1);
-
-                let cycles_elapsed = end_cycle_count - last_cycle_count;
-                let ms_per_frame =
-                    linux::get_seconds_elapsed(last_timestamp.clone(), end_timestamp.clone()) * 1e3;
-                let fps = 1e3 / ms_per_frame;
-                let mcpf = cycles_elapsed as f64 / 1e6;
-                println!("{:.02}ms/f, {:.02}f/s, {:.02}mc/f", ms_per_frame, fps, mcpf);
-
-                last_cycle_count = end_cycle_count;
-                last_timestamp = end_timestamp;
             }
         }
 

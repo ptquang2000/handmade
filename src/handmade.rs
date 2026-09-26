@@ -25,8 +25,8 @@ pub mod game {
     #[derive(Default)]
     pub struct SoundOutputBuffer<'a> {
         pub samples: &'a mut [u8],
-        pub samples_per_second: u32,
-        pub bytes_per_sample: u32,
+        pub samples_per_second: i32,
+        pub bytes_per_sample: i32,
     }
 
     #[derive(Default, Copy, Clone)]
@@ -121,15 +121,10 @@ pub mod game {
         blue_offset: i32,
     }
 
-    pub fn update_and_render(
-        memory: &mut Memory,
-        mut inputs: Input,
-        buffer: OffscreenBuffer,
-        sound_buffer: &mut SoundOutputBuffer,
-    ) {
+    pub fn update_and_render(memory: &mut Memory, mut inputs: Input, buffer: OffscreenBuffer) {
         if !memory.is_initialized {
             let game_state = memory.get_game_state();
-            game_state.tone_hz = 256;
+            game_state.tone_hz = 512;
 
             let filename = concat!(file!(), "\0");
             if let Some((contents, contents_size)) = debug_platform::read_entire_file(filename) {
@@ -145,11 +140,12 @@ pub mod game {
             if controller.is_connected {
                 if controller.is_analog {
                     game_state.blue_offset += (4. * controller.stick_average_x) as i32;
-                    game_state.tone_hz += (i8::MIN as f32 * controller.stick_average_y) as i32;
+                    game_state.tone_hz = 512 + (i8::MIN as f32 * controller.stick_average_y) as i32;
                 } else {
                     if controller.move_left().ended_down {
                         game_state.blue_offset -= 1;
-                    } else if controller.move_right().ended_down {
+                    }
+                    if controller.move_right().ended_down {
                         game_state.blue_offset += 1;
                     }
                 }
@@ -160,7 +156,6 @@ pub mod game {
             }
         }
 
-        output_sound(sound_buffer, game_state.tone_hz);
         render_weird_gradient(
             buffer.memory,
             buffer.pitch as usize,
@@ -170,20 +165,29 @@ pub mod game {
         );
     }
 
+    pub fn get_sound_samples(memory: &mut Memory, sound_buffer: &mut SoundOutputBuffer) {
+        let game_state = memory.get_game_state();
+        output_sound(sound_buffer, game_state.tone_hz);
+    }
+
     pub fn output_sound(sound_buffer: &mut SoundOutputBuffer, tone_hz: i32) {
         static mut T_SINE: f32 = 0.;
-        let tone_volume = 0.2;
+        let tone_volume = 3000.;
         let wave_period = sound_buffer.samples_per_second as f32 / tone_hz as f32;
 
         for sample in sound_buffer
             .samples
             .chunks_exact_mut(sound_buffer.bytes_per_sample as usize)
         {
-            let sample_value = (unsafe { T_SINE.sin() } * tone_volume).to_ne_bytes();
+            let sine_value = unsafe { T_SINE.sin() };
+            let sample_value = ((sine_value * tone_volume) as i16).to_be_bytes();
             for sample_per_channel in sample.chunks_exact_mut(sample_value.len()) {
                 sample_per_channel.copy_from_slice(&sample_value);
             }
-            unsafe { T_SINE += 2 as f32 * std::f32::consts::PI * 1.0 / wave_period };
+            unsafe {
+                T_SINE += 2. * std::f32::consts::PI * 1. / wave_period;
+                T_SINE = T_SINE.rem_euclid(2. * std::f32::consts::PI);
+            }
         }
     }
 
