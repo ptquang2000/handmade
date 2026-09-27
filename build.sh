@@ -1,6 +1,6 @@
 ROOT=$(pwd)
 COMPILER_FLAGS='--cfg HANDMADE_INTERNAL -g -C opt-level=0'
-LINK_FLAGS='-C link-args=-Wl,-rpath,/usr/lib/spa-0.2 -L /usr/lib/spa-0.2 -L .'
+LINK_FLAGS='-C link-args=-Wl,-rpath,/usr/lib/spa-0.2 -C link-args=-Wl,-rpath,$ORIGIN -L /usr/lib/spa-0.2 -L .'
 
 XDG_LIB_PATH='/usr/share/wayland-protocols/stable/xdg-shell'
 
@@ -12,6 +12,7 @@ wayland-scanner client-header ${XDG_LIB_PATH}/xdg-shell.xml xdg-shell-client-pro
 gcc -c xdg-shell-protocol.c -o xdg-shell-protocol.o
 ar rcs libxdg-shell-protocol.a xdg-shell-protocol.o
 
-rustc $COMPILER_FLAGS $LINK_FLAGS --out-dir . $ROOT/src/linux_handmade.rs
+rustc $COMPILER_FLAGS $LINK_FLAGS --out-dir . $ROOT/src/handmade.rs --crate-type cdylib
+rustc $COMPILER_FLAGS $LINK_FLAGS --out-dir . $ROOT/src/linux_handmade.rs --crate-type bin
 
 popd >/dev/null

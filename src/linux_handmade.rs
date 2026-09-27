@@ -1,3 +1,5 @@
+mod handmade;
+
 macro_rules! kilobytes {
     ($value:expr) => {
         $value * 1024
@@ -19,10 +21,8 @@ macro_rules! terabytes {
     };
 }
 
-include!("handmade.rs");
-
 #[cfg(HANDMADE_INTERNAL)]
-pub mod debug_platform {
+mod debug_platform {
     use crate::sys;
 
     pub fn read_entire_file(filename: &str) -> Option<(*mut (), i64)> {
@@ -98,7 +98,7 @@ pub mod debug_platform {
 }
 
 mod linux {
-    use crate::{game, libevdev, pw, sys, wl, xdg};
+    use crate::{handmade, libevdev, pw, sys, wl, xdg};
 
     pub enum KeyCode {
         ESC = 1,
@@ -130,7 +130,7 @@ mod linux {
         pub window: *mut xdg::xdg_surface,
         pub toplevel: *mut xdg::xdg_toplevel,
 
-        pub game_input: *mut game::Input,
+        pub game_input: *mut handmade::game::Input,
 
         pub running: bool,
         pub pause: bool,
@@ -213,28 +213,28 @@ mod linux {
         wl::surface_commit(global_state.surface);
     }
 
-    pub fn process_keyboard_message(new_state: &mut game::ButtonState, is_down: bool) {
+    pub fn process_keyboard_message(new_state: &mut handmade::game::ButtonState, is_down: bool) {
         debug_assert!(new_state.ended_down != is_down);
         new_state.ended_down = is_down;
         new_state.half_transition_count += 1;
     }
 
     pub fn process_input_digital_button(
-        old_state: &game::ButtonState,
+        old_state: &handmade::game::ButtonState,
         value: i32,
-        new_state: &mut game::ButtonState,
+        new_state: &mut handmade::game::ButtonState,
     ) {
         new_state.ended_down = value == 1;
         new_state.half_transition_count = (old_state.ended_down != new_state.ended_down) as i32;
     }
 
     pub fn process_input_stick_value(controller: *mut libevdev::libevdev, code: u32) -> f32 {
-        let left_thump_deadzone = libevdev::get_controller_absinfo(controller, code) as i32;
-        let value = libevdev::get_controller_value(controller, libevdev::EV_ABS, libevdev::ABS_X);
-        if value < -left_thump_deadzone {
-            value as f32 / i16::MIN as f32
-        } else if value > left_thump_deadzone {
-            value as f32 / -i16::MAX as f32
+        let deadzone = libevdev::get_controller_absinfo(controller, code) as i32;
+        let value = libevdev::get_controller_value(controller, libevdev::EV_ABS, code);
+        if value < -deadzone {
+            value as f32 / -(i16::MIN as f32)
+        } else if value > deadzone {
+            value as f32 / (i16::MAX as f32)
         } else {
             0.
         }
@@ -419,6 +419,71 @@ mod linux {
             }
         }
     }
+
+    #[derive(Default)]
+    pub struct GameCode {
+        handle: Option<*mut ()>,
+        update_and_render_stub: Option<handmade::game::UpdateAndRender>,
+        get_sound_samples_stub: Option<handmade::game::GetSoundSample>,
+    }
+
+    impl GameCode {
+        pub fn update_and_render(
+            &self,
+            memory: &mut handmade::game::Memory,
+            inputs: handmade::game::Input,
+            buffer: handmade::game::OffscreenBuffer,
+        ) {
+            if let Some(func) = self.update_and_render_stub {
+                func(memory, inputs, buffer)
+            } else {
+            }
+        }
+
+        pub fn get_sound_samples(
+            &self,
+            memory: &mut handmade::game::Memory,
+            sound_buffer: &mut handmade::game::SoundBuffer,
+        ) {
+            if let Some(func) = self.get_sound_samples_stub {
+                func(memory, sound_buffer)
+            } else {
+            }
+        }
+    }
+
+    pub fn load_game_code() -> GameCode {
+        let mut game_code = GameCode::default();
+        unsafe {
+            let game_code_library =
+                sys::dlopen("libhandmade.so\0".as_ptr() as *const i8, sys::RTLD_NOW);
+            game_code.handle = if !game_code_library.is_null() {
+                game_code.update_and_render_stub =
+                    std::mem::transmute::<*mut std::ffi::c_void, _>(sys::dlsym(
+                        game_code_library,
+                        "update_and_render\0".as_ptr() as *const i8,
+                    ));
+                game_code.get_sound_samples_stub =
+                    std::mem::transmute::<*mut std::ffi::c_void, _>(sys::dlsym(
+                        game_code_library,
+                        "get_sound_samples\0".as_ptr() as *const i8,
+                    ));
+                Some(game_code_library as *mut ())
+            } else {
+                None
+            };
+        }
+        game_code
+    }
+
+    pub fn unload_game_code(game_code: &mut GameCode) {
+        if let Some(handle) = game_code.handle {
+            unsafe { sys::dlclose(handle as *mut std::ffi::c_void) };
+        }
+
+        game_code.update_and_render_stub = None;
+        game_code.get_sound_samples_stub = None;
+    }
 }
 
 mod sys {
@@ -447,6 +512,8 @@ mod sys {
     pub const S_IROTH: i64 = S_IRGRP >> 3;
 
     pub const SEEK_END: i32 = 2;
+
+    pub const RTLD_NOW: i32 = 0x00002;
 
     #[derive(Default)]
     pub struct MemFd {
@@ -585,6 +652,7 @@ mod sys {
 
     #[link(name = "dl")]
     unsafe extern "C" {
+        pub fn dlclose(handle: *mut std::ffi::c_void) -> std::ffi::c_int;
         pub fn dlopen(
             path: *const std::ffi::c_char,
             flags: std::ffi::c_int,
@@ -638,9 +706,8 @@ mod libevdev {
     pub const BTN_START: u32 = 0x13b;
 
     pub fn load_libevdev() {
-        const RTLD_NOW: i32 = 0x00002;
         unsafe {
-            let evdev_library = sys::dlopen("libevdev.so\0".as_ptr() as *const i8, RTLD_NOW);
+            let evdev_library = sys::dlopen("libevdev.so\0".as_ptr() as *const i8, sys::RTLD_NOW);
             if !evdev_library.is_null() {
                 evdev_symbol!(LIBEVDEV, evdev_library, new);
                 evdev_symbol!(LIBEVDEV, evdev_library, new_from_fd);
@@ -705,7 +772,7 @@ mod libevdev {
 
     enum ReadFlag {
         Sync = 1,
-        Normal,
+        Normal = 2,
     }
 
     enum ReadStatus {
@@ -716,20 +783,22 @@ mod libevdev {
 
     pub fn get_controller_state(dev: *mut libevdev) -> Result<(), i32> {
         let mut event = input_event::default();
+        let mut flag = ReadFlag::Normal as u32;
         unsafe {
-            let mut rc =
-                (LIBEVDEV.next_event)(dev, ReadFlag::Normal as u32, std::ptr::addr_of_mut!(event));
-            while rc == ReadStatus::Sync as i32 {
-                rc = (LIBEVDEV.next_event)(
-                    dev,
-                    ReadFlag::Sync as u32,
-                    std::ptr::addr_of_mut!(event),
-                );
-            }
-            if rc == ReadStatus::Eagain as i32 || rc == ReadStatus::Success as i32 {
-                Ok(())
-            } else {
-                Err(rc)
+            loop {
+                let rc = (LIBEVDEV.next_event)(dev, flag, std::ptr::addr_of_mut!(event));
+                if rc == ReadStatus::Sync as i32 {
+                    flag = ReadFlag::Sync as u32;
+                } else if rc == ReadStatus::Eagain as i32 {
+                    if flag == ReadFlag::Sync as u32 {
+                        flag = ReadFlag::Normal as u32;
+                    } else {
+                        return Ok(());
+                    }
+                } else if rc != ReadStatus::Success as i32 {
+                    return Err(rc);
+                } else {
+                }
             }
         }
     }
@@ -1802,7 +1871,7 @@ mod xdg {
 }
 
 mod pw {
-    use crate::{game, linux, pw};
+    use crate::{handmade, linux, pw};
 
     const PW_VERSION_STREAM_EVENTS: u32 = 2;
 
@@ -1931,11 +2000,11 @@ mod pw {
     pub fn fill_sound_buffer(
         sound_output: &mut linux::SoundOutput,
         write_index: u32,
-        sound_buffer: game::SoundOutputBuffer,
+        sound_buffer: handmade::game::SoundBuffer,
     ) {
         let secondary_buffer = sound_output.secondary_buffer.as_slice_mut();
         let secondary_buffer_size = secondary_buffer.len();
-        let bytes_to_write = sound_buffer.samples.len() as u32;
+        let bytes_to_write = sound_buffer.sample_count * sound_output.bytes_per_sample;
 
         unsafe {
             pw::spa_ringbuffer_write_data(
@@ -1943,8 +2012,8 @@ mod pw {
                 secondary_buffer.as_mut_ptr() as *mut std::ffi::c_void,
                 secondary_buffer_size as u32,
                 write_index as u32 % secondary_buffer_size as u32,
-                sound_buffer.samples.as_ptr() as *const std::ffi::c_void,
-                bytes_to_write,
+                sound_buffer.memory as *const std::ffi::c_void,
+                bytes_to_write as u32,
             );
             pw::spa_ringbuffer_write_update(
                 std::ptr::addr_of_mut!(sound_output.ring),
@@ -2408,7 +2477,7 @@ fn main() {
         .unwrap();
         sound_output.safety_bytes = ((sound_output.samples_per_second / GAME_UPDATE_HZ as i32) / 3)
             * sound_output.bytes_per_sample;
-        let mut samples = sys::memfd_alloc(
+        let samples = sys::memfd_alloc(
             "handmade-samples\0",
             sound_output.secondary_buffer.size as i64,
             0,
@@ -2442,13 +2511,14 @@ fn main() {
             let (permanent_storage, transient_storage) = allocated_memory
                 .as_slice_mut()
                 .split_at_mut(permanent_storage_size as usize);
-            let mut game_memory = game::Memory {
-                is_initialized: false,
-                permanent_storage: permanent_storage,
-                transient_storage: transient_storage,
-            };
+            let mut game_memory = handmade::game::Memory::default();
+            game_memory.permanent_storage_memory = permanent_storage.as_mut_ptr();
+            game_memory.transient_storage_size = transient_storage.len();
+            game_memory.read_entire_file_stub = Some(debug_platform::read_entire_file);
+            game_memory.write_entire_file_stub = Some(debug_platform::write_entire_file);
+            game_memory.free_file_memory_stub = Some(debug_platform::free_file_memory);
 
-            let mut inputs = [game::Input::default(); 2];
+            let mut inputs = [handmade::game::Input::default(); 2];
             let controllers = libevdev::get_controllers();
             let max_controller_count = controllers.iter().take_while(|dev| !dev.is_null()).count();
             let max_controller_count = max_controller_count.min(inputs[0].controllers.len() - 1);
@@ -2463,14 +2533,19 @@ fn main() {
             let mut audio_latency_seconds;
             let mut sound_is_valid = false;
 
+            let mut game = linux::load_game_code();
+
             let mut last_cycle_count = sys::cycle_get_count();
             while global_state.running {
+                linux::unload_game_code(&mut game);
+                game = linux::load_game_code();
+
                 let [new_input, old_input] = &mut inputs;
                 global_state.game_input = &mut *new_input as *mut _;
 
                 let old_keyboard_controller = &old_input.controllers[0];
                 let new_keyboard_controller = &mut new_input.controllers[0];
-                *new_keyboard_controller = game::ControllerInput::default();
+                *new_keyboard_controller = handmade::game::ControllerInput::default();
                 for (new_button, old_button) in new_keyboard_controller
                     .buttons
                     .iter_mut()
@@ -2640,15 +2715,15 @@ fn main() {
                         }
                     }
 
-                    let buffer = game::OffscreenBuffer {
-                        memory: global_state.back_buffer.memory.as_slice_mut(),
+                    let buffer = handmade::game::OffscreenBuffer {
+                        memory: global_state.back_buffer.memory.addr,
                         width: global_state.back_buffer.width,
                         height: global_state.back_buffer.height,
                         pitch: global_state.back_buffer.pitch,
                         bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
                     };
 
-                    game::update_and_render(&mut game_memory, new_input.clone(), buffer);
+                    game.update_and_render(&mut game_memory, new_input.clone(), buffer);
 
                     let audio_wall_clock = sys::get_wall_clock().unwrap();
                     let from_begin_to_audio_seconds =
@@ -2716,12 +2791,13 @@ fn main() {
                         };
                         debug_assert!(bytes_to_write % sound_output.bytes_per_sample as u32 == 0);
 
-                        let mut sound_buffer = game::SoundOutputBuffer::default();
+                        let mut sound_buffer = handmade::game::SoundBuffer::default();
                         sound_buffer.samples_per_second = sound_output.samples_per_second;
+                        sound_buffer.sample_count =
+                            bytes_to_write as i32 / sound_output.bytes_per_sample;
                         sound_buffer.bytes_per_sample = sound_output.bytes_per_sample;
-                        sound_buffer.samples =
-                            &mut samples.as_slice_mut()[..bytes_to_write as usize];
-                        game::get_sound_samples(&mut game_memory, &mut sound_buffer);
+                        sound_buffer.memory = samples.addr;
+                        game.get_sound_samples(&mut game_memory, &mut sound_buffer);
 
                         #[cfg(HANDMADE_INTERNAL)]
                         {

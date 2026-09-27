@@ -7,3 +7,8 @@ build = "build.rs"
 [[bin]]
 name = "linux_handmade"
 path = "src/linux_handmade.rs"
+
+[lib] 
+name="libhandmade" 
+path="src/handmade.rs"
+crate-type=["cdylib"]
