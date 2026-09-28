@@ -23,33 +23,33 @@ macro_rules! terabytes {
 
 #[cfg(HANDMADE_INTERNAL)]
 mod debug_platform {
-    use crate::sys;
+    use crate::linux;
 
     pub fn read_entire_file(filename: &str) -> Option<(*mut (), i64)> {
         debug_assert!(filename.ends_with('\0'));
         unsafe {
-            let fd = sys::open(
+            let fd = linux::open(
                 filename.as_ptr() as *const std::ffi::c_void,
-                sys::O_RDONLY,
-                sys::S_IRUSR | sys::S_IRGRP | sys::S_IROTH,
+                linux::O_RDONLY,
+                linux::S_IRUSR | linux::S_IRGRP | linux::S_IROTH,
             );
             if fd != -1 {
-                let size = sys::lseek(fd, 0, sys::SEEK_END);
+                let size = linux::lseek(fd, 0, linux::SEEK_END);
                 if size != -1 {
-                    let result = sys::mmap(
+                    let result = linux::mmap(
                         std::ptr::null_mut(),
                         size as usize,
-                        sys::PROT_READ,
-                        sys::MAP_PRIVATE,
+                        linux::PROT_READ,
+                        linux::MAP_PRIVATE,
                         fd,
                         0,
                     ) as *mut ();
-                    if result as i32 != sys::MAP_FAILED {
+                    if result as i32 != linux::MAP_FAILED {
                         return Some((result, size));
                     }
                 } else {
                 }
-                sys::close(fd);
+                linux::close(fd);
             } else {
             }
         }
@@ -59,33 +59,33 @@ mod debug_platform {
     pub fn write_entire_file(filename: &str, memory: *mut (), memory_size: i64) -> bool {
         debug_assert!(filename.ends_with('\0'));
         unsafe {
-            let fd = sys::open(
+            let fd = linux::open(
                 filename.as_ptr() as *const std::ffi::c_void,
-                sys::O_RDWR | sys::O_CREAT | sys::O_TRUNC,
-                sys::S_IRUSR | sys::S_IWUSR | sys::S_IRGRP | sys::S_IROTH,
+                linux::O_RDWR | linux::O_CREAT | linux::O_TRUNC,
+                linux::S_IRUSR | linux::S_IWUSR | linux::S_IRGRP | linux::S_IROTH,
             );
             if fd != -1 {
-                if sys::ftruncate(fd, memory_size) != -1 {
-                    let result = sys::mmap(
+                if linux::ftruncate(fd, memory_size) != -1 {
+                    let result = linux::mmap(
                         std::ptr::null_mut(),
                         memory_size as usize,
-                        sys::PROT_WRITE,
-                        sys::MAP_SHARED,
+                        linux::PROT_WRITE,
+                        linux::MAP_SHARED,
                         fd,
                         0,
                     ) as *mut ();
-                    if result as i32 != sys::MAP_FAILED {
+                    if result as i32 != linux::MAP_FAILED {
                         std::ptr::copy_nonoverlapping(
                             memory as *const u8,
                             result as *mut u8,
                             memory_size as usize,
                         );
-                        sys::munmap(result as *mut std::ffi::c_void, memory_size as usize);
+                        linux::munmap(result as *mut std::ffi::c_void, memory_size as usize);
                         return true;
                     } else {
                     }
                 }
-                sys::close(fd);
+                linux::close(fd);
             } else {
             }
         }
@@ -93,12 +93,12 @@ mod debug_platform {
     }
 
     pub fn free_file_memory(memory: *mut (), size: i64) {
-        unsafe { sys::munmap(memory as *mut std::ffi::c_void, size as usize) };
+        unsafe { linux::munmap(memory as *mut std::ffi::c_void, size as usize) };
     }
 }
 
 mod linux {
-    use crate::{handmade, libevdev, pw, sys, wl, xdg};
+    use crate::{handmade, libevdev, pw, wl, xdg};
 
     pub enum KeyCode {
         ESC = 1,
@@ -150,14 +150,14 @@ mod linux {
         pub stream: *mut pw::pw_stream,
         pub ring: pw::spa_ringbuffer,
         pub eventfd: i32,
-        pub secondary_buffer: sys::MemFd,
+        pub secondary_buffer: MemFd,
     }
 
     pub type ListenerImplementation = unsafe extern "C" fn();
 
     #[derive(Default)]
     pub struct OffscreenBuffer {
-        pub memory: sys::MemFd,
+        pub memory: MemFd,
         pub width: i32,
         pub height: i32,
         pub pitch: i32,
@@ -183,10 +183,10 @@ mod linux {
         buffer.pitch = width * buffer.bytes_per_pixel;
         let bitmap_size = height * buffer.pitch;
         if !buffer.memory.is_null() {
-            sys::memfd_release(&mut buffer.memory);
+            memfd_release(&mut buffer.memory);
         }
 
-        buffer.memory = sys::memfd_alloc("handmade_hero\0", bitmap_size as i64, 0).unwrap();
+        buffer.memory = memfd_alloc("handmade_hero\0", bitmap_size as i64, 0).unwrap();
         let pool = wl::shm_create_pool(global_state.shm, buffer.memory.fd, bitmap_size);
         global_state.buffer = wl::shm_pool_create_buffer(
             pool,
@@ -240,7 +240,7 @@ mod linux {
         }
     }
 
-    pub fn get_seconds_elapsed(last_counter: sys::timespec, work_counter: sys::timespec) -> f64 {
+    pub fn get_seconds_elapsed(last_counter: timespec, work_counter: timespec) -> f64 {
         work_counter.tv_sec as f64 - last_counter.tv_sec as f64 + work_counter.tv_nsec as f64 / 1e9
             - last_counter.tv_nsec as f64 / 1e9
     }
@@ -423,6 +423,7 @@ mod linux {
     #[derive(Default)]
     pub struct GameCode {
         handle: Option<*mut ()>,
+        pub last_write_time: i64,
         update_and_render_stub: Option<handmade::game::UpdateAndRender>,
         get_sound_samples_stub: Option<handmade::game::GetSoundSample>,
     }
@@ -452,19 +453,42 @@ mod linux {
         }
     }
 
-    pub fn load_game_code() -> GameCode {
+    pub fn get_last_write_time(filename: &str) -> Option<i64> {
+        const AT_FDCWD: i32 = -100;
+        const AT_STATX_SYNC_AS_STAT: i32 = 0x0000;
+        const STATX_MTIME: u32 = 0x00000040;
+
+        let mut stat = statx::default();
+        if unsafe {
+            statx(
+                AT_FDCWD,
+                filename.as_ptr() as *const _,
+                AT_STATX_SYNC_AS_STAT,
+                STATX_MTIME,
+                std::ptr::addr_of_mut!(stat),
+            )
+        } == 0
+        {
+            return Some((stat.stx_mtime.tv_sec << 30) | stat.stx_mtime.tv_nsec as i64);
+        }
+        None
+    }
+
+    pub fn load_game_code(filename: &str) -> GameCode {
+        debug_assert!(filename.ends_with('\0'));
+
         let mut game_code = GameCode::default();
+        game_code.last_write_time = get_last_write_time(filename).unwrap();
         unsafe {
-            let game_code_library =
-                sys::dlopen("libhandmade.so\0".as_ptr() as *const i8, sys::RTLD_NOW);
+            let game_code_library = dlopen(filename.as_ptr() as *const i8, RTLD_NOW);
             game_code.handle = if !game_code_library.is_null() {
                 game_code.update_and_render_stub =
-                    std::mem::transmute::<*mut std::ffi::c_void, _>(sys::dlsym(
+                    std::mem::transmute::<*mut std::ffi::c_void, _>(dlsym(
                         game_code_library,
                         "update_and_render\0".as_ptr() as *const i8,
                     ));
                 game_code.get_sound_samples_stub =
-                    std::mem::transmute::<*mut std::ffi::c_void, _>(sys::dlsym(
+                    std::mem::transmute::<*mut std::ffi::c_void, _>(dlsym(
                         game_code_library,
                         "get_sound_samples\0".as_ptr() as *const i8,
                     ));
@@ -478,16 +502,12 @@ mod linux {
 
     pub fn unload_game_code(game_code: &mut GameCode) {
         if let Some(handle) = game_code.handle {
-            unsafe { sys::dlclose(handle as *mut std::ffi::c_void) };
+            unsafe { dlclose(handle as *mut std::ffi::c_void) };
         }
 
         game_code.update_and_render_stub = None;
         game_code.get_sound_samples_stub = None;
     }
-}
-
-mod sys {
-    use crate::sys;
 
     pub const MFD_CLOEXEC: u32 = 0x0001;
 
@@ -534,18 +554,18 @@ mod sys {
     pub fn memfd_alloc(name: &str, size: i64, addr: usize) -> Result<MemFd, std::io::Error> {
         debug_assert!(!name.is_empty() && name.ends_with('\0'), "allocate_memory");
 
-        let fd = unsafe { sys::memfd_create(name.as_ptr() as *const i8, MFD_CLOEXEC) };
+        let fd = unsafe { memfd_create(name.as_ptr() as *const i8, MFD_CLOEXEC) };
         if fd == -1 {
             return Err(std::io::Error::last_os_error());
         }
 
-        let result = unsafe { sys::ftruncate(fd, size) };
+        let result = unsafe { ftruncate(fd, size) };
         if result == -1 {
             return Err(std::io::Error::last_os_error());
         }
 
         let addr = unsafe {
-            sys::mmap(
+            mmap(
                 addr as *const std::ffi::c_void,
                 size as usize,
                 PROT_READ | PROT_WRITE,
@@ -566,8 +586,8 @@ mod sys {
     }
 
     pub fn memfd_release(memory: &mut MemFd) {
-        unsafe { sys::close(memory.fd) };
-        unsafe { sys::munmap(memory.addr as *mut std::ffi::c_void, memory.size as usize) };
+        unsafe { close(memory.fd) };
+        unsafe { munmap(memory.addr as *mut std::ffi::c_void, memory.size as usize) };
         *memory = MemFd::default();
     }
 
@@ -575,14 +595,13 @@ mod sys {
         unsafe { core::arch::x86_64::_rdtsc() }
     }
 
-    pub fn get_wall_clock() -> Result<sys::timespec, std::io::Error> {
-        let mut timespec = sys::timespec {
+    pub fn get_wall_clock() -> Result<timespec, std::io::Error> {
+        let mut timespec = timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
         unsafe {
-            if sys::clock_gettime(sys::CLOCK_MONOTONIC_RAW, std::ptr::addr_of_mut!(timespec)) == -1
-            {
+            if clock_gettime(CLOCK_MONOTONIC_RAW, std::ptr::addr_of_mut!(timespec)) == -1 {
                 Err(std::io::Error::last_os_error())
             } else {
                 Ok(timespec)
@@ -643,6 +662,7 @@ mod sys {
         pub events: std::ffi::c_short,
         pub revents: std::ffi::c_short,
     }
+
     #[derive(Default, Clone)]
     #[repr(C)]
     pub struct timespec {
@@ -662,14 +682,91 @@ mod sys {
             symbol: *const std::ffi::c_char,
         ) -> *mut std::ffi::c_void;
     }
+
+    pub fn get_module_path(buf: &mut [u8]) -> &[u8] {
+        let bytes_placed = unsafe {
+            readlink(
+                "/proc/self/exe\0".as_ptr() as *const _,
+                buf.as_mut_ptr() as *mut _,
+                buf.len(),
+            )
+        };
+        if bytes_placed != -1 {
+            &buf[..bytes_placed as usize]
+        } else {
+            eprintln!("{}", std::io::Error::last_os_error().to_string());
+            &buf[..0]
+        }
+    }
+
+    #[derive(Default, Clone)]
+    #[repr(C)]
+    struct statx {
+        stx_mask: u32,
+        stx_blksize: u32,
+        stx_attributes: u64,
+        stx_nlink: u32,
+        stx_uid: u32,
+        stx_gid: u32,
+        stx_mode: u16,
+        __spare0: [u16; 1],
+        stx_ino: u64,
+        stx_size: u64,
+        stx_blocks: u64,
+        stx_attributes_mask: u64,
+        stx_atime: statx_timestamp,
+        stx_btime: statx_timestamp,
+        stx_ctime: statx_timestamp,
+        stx_mtime: statx_timestamp,
+        stx_rdev_major: u32,
+        stx_rdev_minor: u32,
+        stx_dev_major: u32,
+        stx_dev_minor: u32,
+        stx_mnt_id: u64,
+        stx_dio_mem_align: u32,
+        stx_dio_offset_align: u32,
+        stx_subvol: u64,
+        stx_atomic_write_unit_min: u32,
+        stx_atomic_write_unit_max: u32,
+        stx_atomic_write_segments_max: u32,
+        stx_dio_read_offset_align: u32,
+        stx_atomic_write_unit_max_opt: u32,
+        __spare2: [u32; 1],
+        __spare3: [u64; 8],
+    }
+
+    #[derive(Default, Clone)]
+    #[repr(C)]
+    struct statx_timestamp {
+        tv_sec: i64,
+        tv_nsec: u32,
+        __reserved: i32,
+    }
+
+    #[link(name = "c")]
+    unsafe extern "C" {
+        fn statx(
+            dirfd: std::ffi::c_int,
+            path: *const std::ffi::c_char,
+            flags: std::ffi::c_int,
+            mask: std::ffi::c_uint,
+            statxbuf: *mut statx,
+        ) -> std::ffi::c_int;
+
+        fn readlink(
+            path: *const std::ffi::c_char,
+            buf: *mut std::ffi::c_char,
+            bufsiz: usize,
+        ) -> isize;
+    }
 }
 
 mod libevdev {
-    use crate::sys;
+    use crate::linux;
 
     macro_rules! evdev_symbol {
         ($dev:expr, $lib:expr, $field:ident) => {
-            $dev.$field = std::mem::transmute::<*mut std::ffi::c_void, _>(sys::dlsym(
+            $dev.$field = std::mem::transmute::<*mut std::ffi::c_void, _>(linux::dlsym(
                 $lib,
                 concat!("libevdev_", stringify!($field), "\0").as_ptr() as *const i8,
             ));
@@ -707,7 +804,8 @@ mod libevdev {
 
     pub fn load_libevdev() {
         unsafe {
-            let evdev_library = sys::dlopen("libevdev.so\0".as_ptr() as *const i8, sys::RTLD_NOW);
+            let evdev_library =
+                linux::dlopen("libevdev.so\0".as_ptr() as *const i8, linux::RTLD_NOW);
             if !evdev_library.is_null() {
                 evdev_symbol!(LIBEVDEV, evdev_library, new);
                 evdev_symbol!(LIBEVDEV, evdev_library, new_from_fd);
@@ -730,10 +828,10 @@ mod libevdev {
             let mut cursor: &mut [u8] = &mut buffer;
             if write!(cursor, "/dev/input/event{}\0", event_index).is_ok() {
                 unsafe {
-                    let fd = sys::open(
+                    let fd = linux::open(
                         buffer.as_ptr() as *const std::ffi::c_void,
-                        sys::O_RDONLY | sys::O_NONBLOCK,
-                        sys::S_IRUSR | sys::S_IRGRP,
+                        linux::O_RDONLY | linux::O_NONBLOCK,
+                        linux::S_IRUSR | linux::S_IRGRP,
                     );
                     if (LIBEVDEV.new_from_fd)(fd, controllers.as_mut_ptr().add(controller_index))
                         >= 0
@@ -754,7 +852,7 @@ mod libevdev {
                         if has_shoulder_left && has_start && has_left_joystick {
                             controller_index += 1;
                         } else {
-                            sys::close(fd);
+                            linux::close(fd);
                         }
                     } else if std::io::Error::last_os_error().raw_os_error() == Some(2) {
                         break;
@@ -908,7 +1006,7 @@ mod libevdev {
 }
 
 mod wl {
-    use crate::{linux, sys, wl, xdg};
+    use crate::{linux, wl, xdg};
 
     const WL_DISPLAY_GET_REGISTRY: u32 = 1;
 
@@ -967,13 +1065,13 @@ mod wl {
             wl_display_flush(display);
 
             const POLLIN: i16 = 0x001;
-            let mut fds = sys::Pollfd {
+            let mut fds = linux::Pollfd {
                 fd: wl_display_get_fd(display),
                 events: POLLIN,
                 revents: 0,
             };
             let nfds = 1;
-            if sys::poll(&mut fds, nfds, timeout) == -1 || fds.revents == 0 {
+            if linux::poll(&mut fds, nfds, timeout) == -1 || fds.revents == 0 {
                 wl_display_cancel_read(display);
             } else {
                 debug_assert!(fds.revents == POLLIN, "{}", fds.revents);
@@ -2435,7 +2533,39 @@ mod pw {
     }
 }
 
+fn cat_strings<'a>(
+    source_a: &[u8],
+    source_b: &[u8],
+    dest: &'a mut [u8],
+) -> Result<&'a str, std::str::Utf8Error> {
+    let mut size = source_a.len();
+    dest[..size].copy_from_slice(source_a);
+    dest[size..size + source_b.len()].copy_from_slice(source_b);
+    size += source_b.len();
+    dest[size] = 0;
+    size += 1;
+    std::str::from_utf8(&dest[..size])
+}
+
 fn main() {
+    let mut exe_filename = [0; 256];
+    let exe_filename = linux::get_module_path(&mut exe_filename);
+    let last_splash = exe_filename
+        .iter()
+        .rev()
+        .skip_while(|&c| (*c) as char != '/')
+        .count();
+    let exe_filename = &exe_filename[..last_splash];
+
+    let source_gamecode_filename = "libhandmade.so";
+    let mut source_gamecode_fullpath = [0; 256];
+    let source_gamecode_fullpath = cat_strings(
+        &exe_filename,
+        source_gamecode_filename.as_bytes(),
+        &mut source_gamecode_fullpath,
+    )
+    .unwrap();
+
     libevdev::load_libevdev();
 
     let mut global_state = linux::GlobalState::default();
@@ -2469,7 +2599,7 @@ fn main() {
         sound_output.samples_per_second = 48000;
         sound_output.channels = 2;
         sound_output.bytes_per_sample = sound_output.channels * std::mem::size_of::<i16>() as i32;
-        sound_output.secondary_buffer = sys::memfd_alloc(
+        sound_output.secondary_buffer = linux::memfd_alloc(
             "handmade_sound\0",
             (sound_output.samples_per_second * sound_output.bytes_per_sample) as i64,
             0,
@@ -2477,7 +2607,7 @@ fn main() {
         .unwrap();
         sound_output.safety_bytes = ((sound_output.samples_per_second / GAME_UPDATE_HZ as i32) / 3)
             * sound_output.bytes_per_sample;
-        let samples = sys::memfd_alloc(
+        let samples = linux::memfd_alloc(
             "handmade-samples\0",
             sound_output.secondary_buffer.size as i64,
             0,
@@ -2502,7 +2632,7 @@ fn main() {
         } else {
             0
         };
-        let allocated_memory = sys::memfd_alloc(
+        let allocated_memory = linux::memfd_alloc(
             "\0",
             permanent_storage_size + transient_storage_size,
             base_address,
@@ -2523,8 +2653,8 @@ fn main() {
             let max_controller_count = controllers.iter().take_while(|dev| !dev.is_null()).count();
             let max_controller_count = max_controller_count.min(inputs[0].controllers.len() - 1);
 
-            let mut last_wall_clock = sys::get_wall_clock().unwrap();
-            let mut flip_wall_clock = sys::get_wall_clock().unwrap();
+            let mut last_wall_clock = linux::get_wall_clock().unwrap();
+            let mut flip_wall_clock = linux::get_wall_clock().unwrap();
 
             let mut debug_time_marker_index = 0;
             let mut debug_time_markers = [linux::DebugTimeMarker::default(); GAME_UPDATE_HZ / 2];
@@ -2533,12 +2663,16 @@ fn main() {
             let mut audio_latency_seconds;
             let mut sound_is_valid = false;
 
-            let mut game = linux::load_game_code();
+            let mut game = linux::load_game_code(&source_gamecode_fullpath);
 
-            let mut last_cycle_count = sys::cycle_get_count();
+            let mut last_cycle_count = linux::cycle_get_count();
             while global_state.running {
-                linux::unload_game_code(&mut game);
-                game = linux::load_game_code();
+                let new_game_write_time =
+                    linux::get_last_write_time(source_gamecode_fullpath).unwrap();
+                if new_game_write_time != game.last_write_time {
+                    linux::unload_game_code(&mut game);
+                    game = linux::load_game_code(&source_gamecode_fullpath);
+                }
 
                 let [new_input, old_input] = &mut inputs;
                 global_state.game_input = &mut *new_input as *mut _;
@@ -2725,7 +2859,7 @@ fn main() {
 
                     game.update_and_render(&mut game_memory, new_input.clone(), buffer);
 
-                    let audio_wall_clock = sys::get_wall_clock().unwrap();
+                    let audio_wall_clock = linux::get_wall_clock().unwrap();
                     let from_begin_to_audio_seconds =
                         linux::get_seconds_elapsed(flip_wall_clock.clone(), audio_wall_clock);
 
@@ -2833,7 +2967,7 @@ fn main() {
                         sound_is_valid = false;
                     }
 
-                    let end_wall_clock = sys::get_wall_clock().unwrap();
+                    let end_wall_clock = linux::get_wall_clock().unwrap();
 
                     let work_seconds_elapsed =
                         linux::get_seconds_elapsed(last_wall_clock.clone(), end_wall_clock);
@@ -2843,18 +2977,18 @@ fn main() {
                             let sleep_ms =
                                 (target_seconds_per_frame - seconds_elapsed_for_frame) * 1e3;
                             if sleep_ms > 0. {
-                                sys::sleep(sleep_ms as i32);
+                                linux::sleep(sleep_ms as i32);
                             }
                             seconds_elapsed_for_frame = linux::get_seconds_elapsed(
                                 last_wall_clock.clone(),
-                                sys::get_wall_clock().unwrap(),
+                                linux::get_wall_clock().unwrap(),
                             );
                         }
                     } else {
                     }
 
-                    let end_cycle_count = sys::cycle_get_count();
-                    let end_wall_clock = sys::get_wall_clock().unwrap();
+                    let end_cycle_count = linux::cycle_get_count();
+                    let end_wall_clock = linux::get_wall_clock().unwrap();
 
                     #[cfg(HANDMADE_INTERNAL)]
                     linux::debug_sync_display(
@@ -2867,7 +3001,7 @@ fn main() {
 
                     linux::display_buffer_in_window(&mut global_state, 0, 0);
 
-                    flip_wall_clock = sys::get_wall_clock().unwrap();
+                    flip_wall_clock = linux::get_wall_clock().unwrap();
                     #[cfg(HANDMADE_INTERNAL)]
                     if let Some((play_cursor, write_cursor)) =
                         pw::get_current_position(&sound_output)
