@@ -9,7 +9,9 @@ pub mod game {
 
     pub type UpdateAndRender =
         extern "C" fn(memory: &mut Memory, inputs: Input, buffer: OffscreenBuffer);
+    const _: UpdateAndRender = update_and_render;
     pub type GetSoundSample = extern "C" fn(memory: &mut Memory, sound_buffer: &SoundBuffer);
+    const _: GetSoundSample = get_sound_samples;
 
     #[repr(C)]
     #[derive(Default)]
@@ -244,7 +246,7 @@ pub mod game {
             .samples()
             .chunks_exact_mut(sound_buffer.bytes_per_sample as usize)
         {
-            let sine_value = if cfg!(any()) {
+            let sine_value = if cfg!(all()) {
                 game_state.t_sine.sin()
             } else {
                 0.
@@ -289,7 +291,7 @@ pub mod game {
             for (x, pixel) in pixels.enumerate() {
                 let blue = (x as i32 + x_offset) & 0xFF;
                 let green = (y as i32 + y_offset) & 0xFF;
-                pixel.copy_from_slice(&(green << 16 | blue).to_ne_bytes());
+                pixel.copy_from_slice(&(green << 8 | blue).to_ne_bytes());
             }
         }
     }

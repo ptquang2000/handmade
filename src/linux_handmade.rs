@@ -780,6 +780,13 @@ mod linux {
         ) -> isize;
     }
 
+    pub struct StateFileName([u8; 256]);
+    impl Default for StateFileName {
+        fn default() -> Self {
+            StateFileName([0; 256])
+        }
+    }
+
     #[derive(Default)]
     pub struct State {
         pub game_memory: MemFd,
@@ -789,6 +796,9 @@ mod linux {
 
         pub play_back_fd: i32,
         pub input_playing_index: i32,
+
+        pub exe_filepath: StateFileName,
+        pub last_slash: usize,
     }
 
     #[link(name = "c")]
@@ -797,80 +807,113 @@ mod linux {
         fn write(fd: std::ffi::c_int, buf: *mut std::ffi::c_void, size: usize) -> isize;
     }
 
-    pub fn begin_record_input(linux_state: &mut State, input_recording_index: i32) {
-        linux_state.input_recording_index = input_recording_index;
+    pub fn begin_record_input(state: &mut State, input_recording_index: i32) {
+        state.input_recording_index = input_recording_index;
 
-        let filename = "foo.hmi\0";
+        let mut filename = StateFileName::default();
+        get_input_file_location(state, input_recording_index, &mut filename);
         unsafe {
-            linux_state.recording_fd = open(
-                filename.as_ptr() as *const std::ffi::c_void,
+            state.recording_fd = open(
+                filename.0.as_ptr() as *const std::ffi::c_void,
                 O_RDWR | O_CREAT | O_TRUNC,
                 S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH,
             );
             let _ = write(
-                linux_state.recording_fd,
-                linux_state.game_memory.addr as *mut _,
-                linux_state.game_memory.size,
+                state.recording_fd,
+                state.game_memory.addr as *mut _,
+                state.game_memory.size,
             );
         }
     }
 
-    pub fn end_record_input(linux_state: &mut State) {
-        unsafe { close(linux_state.recording_fd) };
-        linux_state.input_recording_index = 0;
+    pub fn end_record_input(state: &mut State) {
+        unsafe { close(state.recording_fd) };
+        state.input_recording_index = 0;
     }
 
-    pub fn begin_input_play_back(linux_state: &mut State, input_playing_index: i32) {
-        linux_state.input_playing_index = input_playing_index;
+    pub fn begin_input_play_back(state: &mut State, input_playing_index: i32) {
+        state.input_playing_index = input_playing_index;
 
-        let filename = "foo.hmi\0";
+        let mut filename = StateFileName::default();
+        get_input_file_location(state, input_playing_index, &mut filename);
         unsafe {
-            linux_state.play_back_fd = open(
-                filename.as_ptr() as *const std::ffi::c_void,
+            state.play_back_fd = open(
+                filename.0.as_ptr() as *const std::ffi::c_void,
                 O_RDONLY,
                 S_IRUSR | S_IRGRP | S_IROTH,
             );
             let _ = read(
-                linux_state.play_back_fd,
-                linux_state.game_memory.addr as *mut _,
-                linux_state.game_memory.size,
+                state.play_back_fd,
+                state.game_memory.addr as *mut _,
+                state.game_memory.size,
             );
         }
     }
 
-    pub fn end_input_play_back(linux_state: &mut State) {
-        unsafe { close(linux_state.play_back_fd) };
-        linux_state.input_playing_index = 0;
+    pub fn end_input_play_back(state: &mut State) {
+        unsafe { close(state.play_back_fd) };
+        state.input_playing_index = 0;
     }
 
-    pub fn record_input(linux_state: &mut State, mut new_input: handmade::game::Input) {
+    pub fn record_input(state: &mut State, mut new_input: handmade::game::Input) {
         unsafe {
             write(
-                linux_state.recording_fd,
+                state.recording_fd,
                 std::ptr::addr_of_mut!(new_input) as *mut _,
                 std::mem::size_of_val(&new_input),
             );
         }
     }
 
-    pub fn play_back_input(linux_state: &mut State, new_input: &mut handmade::game::Input) {
+    pub fn play_back_input(state: &mut State, new_input: &mut handmade::game::Input) {
         unsafe {
             let bytes_read = read(
-                linux_state.play_back_fd,
+                state.play_back_fd,
                 new_input as *mut handmade::game::Input as *mut _,
                 std::mem::size_of_val(new_input),
             );
             if bytes_read == 0 {
-                let play_index = linux_state.input_playing_index;
-                end_input_play_back(linux_state);
-                begin_input_play_back(linux_state, play_index);
+                let play_index = state.input_playing_index;
+                end_input_play_back(state);
+                begin_input_play_back(state, play_index);
                 read(
-                    linux_state.play_back_fd,
+                    state.play_back_fd,
                     new_input as *mut handmade::game::Input as *mut _,
                     std::mem::size_of_val(new_input),
                 );
             }
         }
+    }
+
+    pub fn get_input_file_location<'a>(
+        state: &State,
+        slot_index: i32,
+        dest: &'a mut StateFileName,
+    ) -> &'a str {
+        debug_assert!(slot_index == 1);
+        build_exe_path_filename(state, "loop_edit.hmi", dest)
+    }
+
+    pub fn get_exe_filename(state: &mut State) {
+        let exe_filename = get_module_path(&mut state.exe_filepath.0);
+        state.last_slash = exe_filename
+            .iter()
+            .rev()
+            .skip_while(|&c| (*c) as char != '/')
+            .count();
+    }
+
+    pub fn build_exe_path_filename<'a>(
+        state: &State,
+        filename: &str,
+        dest: &'a mut StateFileName,
+    ) -> &'a str {
+        crate::cat_strings(
+            &state.exe_filepath.0[..state.last_slash],
+            filename.as_bytes(),
+            &mut dest.0,
+        )
+        .unwrap()
     }
 }
 
@@ -2779,23 +2822,15 @@ fn cat_strings<'a>(
 }
 
 fn main() {
-    let mut exe_filename = [0; 256];
-    let exe_filename = linux::get_module_path(&mut exe_filename);
-    let last_splash = exe_filename
-        .iter()
-        .rev()
-        .skip_while(|&c| (*c) as char != '/')
-        .count();
-    let exe_filename = &exe_filename[..last_splash];
+    let mut linux_state = linux::State::default();
+    linux::get_exe_filename(&mut linux_state);
 
-    let source_gamecode_filename = "libhandmade.so";
-    let mut source_gamecode_fullpath = [0; 256];
-    let source_gamecode_fullpath = cat_strings(
-        &exe_filename,
-        source_gamecode_filename.as_bytes(),
+    let mut source_gamecode_fullpath = linux::StateFileName::default();
+    let source_gamecode_fullpath = linux::build_exe_path_filename(
+        &linux_state,
+        "libhandmade.so",
         &mut source_gamecode_fullpath,
-    )
-    .unwrap();
+    );
 
     libevdev::load_libevdev();
 
@@ -2850,7 +2885,6 @@ fn main() {
         .unwrap();
         pw::init_pipewire_sound(&mut sound_output);
 
-        let mut linux_state = linux::State::default();
         global_state.linux_state = &mut linux_state as *mut _;
         global_state.running = true;
 
@@ -2946,6 +2980,8 @@ fn main() {
 
                         if libevdev::get_controller_state(controllers[controller_index]).is_ok() {
                             new_controller.is_connected = true;
+                            new_controller.is_analog = old_controller.is_analog;
+
                             linux::process_input_digital_button(
                                 old_controller.action_up(),
                                 libevdev::get_controller_value(
@@ -3019,7 +3055,6 @@ fn main() {
                                 new_controller.back(),
                             );
 
-                            new_controller.is_analog = true;
                             new_controller.stick_average_x = linux::process_input_stick_value(
                                 controllers[controller_index],
                                 libevdev::ABS_X,
@@ -3028,6 +3063,12 @@ fn main() {
                                 controllers[controller_index],
                                 libevdev::ABS_Y,
                             );
+                            if new_controller.stick_average_x != 0.
+                                || new_controller.stick_average_y != 0.
+                            {
+                                new_controller.is_analog = true;
+                            }
+
                             if libevdev::get_controller_value(
                                 controllers[controller_index],
                                 libevdev::EV_ABS,
@@ -3035,6 +3076,7 @@ fn main() {
                             ) == -1
                             {
                                 new_controller.stick_average_y = 1.;
+                                new_controller.is_analog = false;
                             }
                             if libevdev::get_controller_value(
                                 controllers[controller_index],
@@ -3043,6 +3085,7 @@ fn main() {
                             ) == 1
                             {
                                 new_controller.stick_average_y = -1.;
+                                new_controller.is_analog = false;
                             }
                             if libevdev::get_controller_value(
                                 controllers[controller_index],
@@ -3051,6 +3094,7 @@ fn main() {
                             ) == -1
                             {
                                 new_controller.stick_average_x = -1.;
+                                new_controller.is_analog = false;
                             }
                             if libevdev::get_controller_value(
                                 controllers[controller_index],
@@ -3059,6 +3103,7 @@ fn main() {
                             ) == 1
                             {
                                 new_controller.stick_average_x = 1.;
+                                new_controller.is_analog = false;
                             }
 
                             let threshold = 0.5;
@@ -3136,12 +3181,12 @@ fn main() {
                                 * sound_output.bytes_per_sample as u32;
                         let seconds_left_until_flip =
                             target_seconds_per_frame - from_begin_to_audio_seconds;
-                        let _expected_byte_until_flip = (seconds_left_until_flip
+                        let expected_byte_until_flip = (seconds_left_until_flip
                             / target_seconds_per_frame)
                             * expected_sound_bytes_per_frame as f64;
 
                         let expected_frame_boundary_byte =
-                            play_cursor + expected_sound_bytes_per_frame as u32;
+                            play_cursor + expected_byte_until_flip as u32;
 
                         let mut safe_write_cursor = if write_cursor < play_cursor {
                             play_cursor + sound_output.secondary_buffer.size as u32
