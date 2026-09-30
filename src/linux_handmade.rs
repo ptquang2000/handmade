@@ -98,7 +98,7 @@ mod debug_platform {
 }
 
 mod linux {
-    use crate::{handmade, libevdev, pw, wl, xdg};
+    use crate::{handmade, libevdev, pw, wl, wp_alpha, xdg};
 
     pub enum KeyCode {
         ESC = 1,
@@ -109,6 +109,7 @@ mod linux {
         A = 30,
         S = 31,
         D = 32,
+        L = 38,
         SPACE = 57,
         UP = 103,
         LEFT = 105,
@@ -130,12 +131,17 @@ mod linux {
         pub window: *mut xdg::xdg_surface,
         pub toplevel: *mut xdg::xdg_toplevel,
 
+        pub alpha: *mut wp_alpha::wp_alpha_modifier_v1,
+        pub alpha_surface: *mut wp_alpha::wp_alpha_modifier_surface_v1,
+
         pub game_input: *mut handmade::game::Input,
 
         pub running: bool,
         pub pause: bool,
         pub buffer_released: bool,
         pub back_buffer: OffscreenBuffer,
+
+        pub linux_state: *mut State,
     }
 
     #[derive(Default)]
@@ -198,6 +204,7 @@ mod linux {
         );
         wl::shm_pool_destroy(pool);
         wl::buffer_add_listener(global_state.buffer, global_state);
+        xdg::toplevel_set_floating(global_state.toplevel, width, height);
     }
 
     pub fn display_buffer_in_window(global_state: &mut GlobalState, x: i32, y: i32) {
@@ -237,6 +244,19 @@ mod linux {
             value as f32 / (i16::MAX as f32)
         } else {
             0.
+        }
+    }
+
+    pub fn process_pending_events(global_state: &mut GlobalState, display: *mut wl::wl_display) {
+        loop {
+            let dispatched_events = wl::dispatch_pending_events(display, 0);
+            if dispatched_events == -1 {
+                global_state.running = false;
+                break;
+            } else if global_state.buffer_released && dispatched_events == 0 {
+                break;
+            } else {
+            }
         }
     }
 
@@ -444,7 +464,7 @@ mod linux {
         pub fn get_sound_samples(
             &self,
             memory: &mut handmade::game::Memory,
-            sound_buffer: &mut handmade::game::SoundBuffer,
+            sound_buffer: &handmade::game::SoundBuffer,
         ) {
             if let Some(func) = self.get_sound_samples_stub {
                 func(memory, sound_buffer)
@@ -759,6 +779,99 @@ mod linux {
             bufsiz: usize,
         ) -> isize;
     }
+
+    #[derive(Default)]
+    pub struct State {
+        pub game_memory: MemFd,
+
+        pub recording_fd: i32,
+        pub input_recording_index: i32,
+
+        pub play_back_fd: i32,
+        pub input_playing_index: i32,
+    }
+
+    #[link(name = "c")]
+    unsafe extern "C" {
+        fn read(fd: std::ffi::c_int, buf: *mut std::ffi::c_void, size: usize) -> isize;
+        fn write(fd: std::ffi::c_int, buf: *mut std::ffi::c_void, size: usize) -> isize;
+    }
+
+    pub fn begin_record_input(linux_state: &mut State, input_recording_index: i32) {
+        linux_state.input_recording_index = input_recording_index;
+
+        let filename = "foo.hmi\0";
+        unsafe {
+            linux_state.recording_fd = open(
+                filename.as_ptr() as *const std::ffi::c_void,
+                O_RDWR | O_CREAT | O_TRUNC,
+                S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH,
+            );
+            let _ = write(
+                linux_state.recording_fd,
+                linux_state.game_memory.addr as *mut _,
+                linux_state.game_memory.size,
+            );
+        }
+    }
+
+    pub fn end_record_input(linux_state: &mut State) {
+        unsafe { close(linux_state.recording_fd) };
+        linux_state.input_recording_index = 0;
+    }
+
+    pub fn begin_input_play_back(linux_state: &mut State, input_playing_index: i32) {
+        linux_state.input_playing_index = input_playing_index;
+
+        let filename = "foo.hmi\0";
+        unsafe {
+            linux_state.play_back_fd = open(
+                filename.as_ptr() as *const std::ffi::c_void,
+                O_RDONLY,
+                S_IRUSR | S_IRGRP | S_IROTH,
+            );
+            let _ = read(
+                linux_state.play_back_fd,
+                linux_state.game_memory.addr as *mut _,
+                linux_state.game_memory.size,
+            );
+        }
+    }
+
+    pub fn end_input_play_back(linux_state: &mut State) {
+        unsafe { close(linux_state.play_back_fd) };
+        linux_state.input_playing_index = 0;
+    }
+
+    pub fn record_input(linux_state: &mut State, mut new_input: handmade::game::Input) {
+        unsafe {
+            write(
+                linux_state.recording_fd,
+                std::ptr::addr_of_mut!(new_input) as *mut _,
+                std::mem::size_of_val(&new_input),
+            );
+        }
+    }
+
+    pub fn play_back_input(linux_state: &mut State, new_input: &mut handmade::game::Input) {
+        unsafe {
+            let bytes_read = read(
+                linux_state.play_back_fd,
+                new_input as *mut handmade::game::Input as *mut _,
+                std::mem::size_of_val(new_input),
+            );
+            if bytes_read == 0 {
+                let play_index = linux_state.input_playing_index;
+                end_input_play_back(linux_state);
+                begin_input_play_back(linux_state, play_index);
+                read(
+                    linux_state.play_back_fd,
+                    new_input as *mut handmade::game::Input as *mut _,
+                    std::mem::size_of_val(new_input),
+                );
+            }
+        }
+    }
 }
 
 mod libevdev {
@@ -1006,7 +1119,7 @@ mod libevdev {
 }
 
 mod wl {
-    use crate::{linux, wl, xdg};
+    use crate::{linux, wl, wp_alpha, xdg};
 
     const WL_DISPLAY_GET_REGISTRY: u32 = 1;
 
@@ -1366,9 +1479,9 @@ mod wl {
     }
     #[repr(C)]
     pub struct wl_array {
-        size: usize,
-        alloc: usize,
-        data: *mut std::ffi::c_void,
+        pub size: usize,
+        pub alloc: usize,
+        pub data: *mut std::ffi::c_void,
     }
     #[repr(C)]
     pub union wl_argument {
@@ -1518,6 +1631,15 @@ mod wl {
             global_state.seat =
                 registry_bind(registry, name, &wl_seat_interface, version) as *mut wl::wl_seat;
             seat_add_listener(global_state.seat, data.cast::<linux::GlobalState>());
+        } else if interface
+            == std::ffi::CStr::from_ptr(wp_alpha::wp_alpha_modifier_v1_interface.name)
+        {
+            global_state.alpha = registry_bind(
+                registry,
+                name,
+                &wp_alpha::wp_alpha_modifier_v1_interface,
+                version,
+            ) as *mut wp_alpha::wp_alpha_modifier_v1;
         }
     }
 
@@ -1615,6 +1737,16 @@ mod wl {
         } else if key == linux::KeyCode::P as u32 {
             if is_down {
                 global_state.pause = !global_state.pause;
+            }
+        } else if key == linux::KeyCode::L as u32 {
+            let linux_state = &mut (*global_state.linux_state);
+            if is_down {
+                if linux_state.input_recording_index == 0 {
+                    linux::begin_record_input(linux_state, 1);
+                } else {
+                    linux::end_record_input(linux_state);
+                    linux::begin_input_play_back(linux_state, 1);
+                }
             }
         } else {
             println!("key:{}", key);
@@ -1715,7 +1847,7 @@ mod wl {
 }
 
 mod xdg {
-    use crate::{linux, wl};
+    use crate::{linux, wl, wp_alpha};
 
     const XDG_WM_BASE_GET_XDG_SURFACE: u32 = 2;
     const XDG_WM_BASE_PONG: u32 = 3;
@@ -1724,6 +1856,10 @@ mod xdg {
     const XDG_SURFACE_ACK_CONFIGURE: u32 = 4;
 
     const XDG_TOPLEVEL_SET_TITLE: u32 = 2;
+    const XDG_TOPLEVEL_SET_MAX_SIZE: u32 = 7;
+    const XDG_TOPLEVEL_SET_MIN_SIZE: u32 = 8;
+
+    const XDG_TOPLEVEL_STATE_ACTIVATED: u32 = 4;
 
     pub fn wm_add_listener(wm: *mut xdg_wm_base, global_state: *mut linux::GlobalState) {
         unsafe {
@@ -1812,6 +1948,31 @@ mod xdg {
                 toplevel as *mut wl::wl_proxy,
                 std::ptr::addr_of_mut!(toplevel_listener).cast::<linux::ListenerImplementation>(),
                 global_state as *mut std::ffi::c_void,
+            );
+        }
+    }
+
+    pub fn toplevel_set_floating(toplevel: *mut xdg_toplevel, width: i32, height: i32) {
+        let proxy = toplevel as *mut wl::wl_proxy;
+        unsafe {
+            let mut args: [wl::wl_argument; 10] = std::mem::zeroed();
+            args[0].i = width;
+            args[1].i = height;
+            wl::wl_proxy_marshal_array_flags(
+                proxy,
+                XDG_TOPLEVEL_SET_MIN_SIZE,
+                std::ptr::null(),
+                wl::wl_proxy_get_version(proxy),
+                0,
+                args.as_mut_ptr(),
+            );
+            wl::wl_proxy_marshal_array_flags(
+                proxy,
+                XDG_TOPLEVEL_SET_MAX_SIZE,
+                std::ptr::null(),
+                wl::wl_proxy_get_version(proxy),
+                0,
+                args.as_mut_ptr(),
             );
         }
     }
@@ -1909,10 +2070,20 @@ mod xdg {
         _toplevel: *mut xdg_toplevel,
         width: std::ffi::c_int,
         height: std::ffi::c_int,
-        _states: *mut wl::wl_array,
+        states: *mut wl::wl_array,
     ) {
         let global_state = &mut *data.cast::<linux::GlobalState>();
         linux::resize_shared_buffer(global_state, width, height);
+
+        let arr = &*states;
+        let data = arr.data as *const u32;
+        let activated = (0..arr.size / std::mem::size_of::<u32>())
+            .any(|i| *data.add(i as usize) == XDG_TOPLEVEL_STATE_ACTIVATED);
+        if activated {
+            wp_alpha::set_multiplier(global_state.alpha_surface, u32::MAX);
+        } else {
+            wp_alpha::set_multiplier(global_state.alpha_surface, (0.1 * u32::MAX as f32) as u32);
+        }
     }
 
     unsafe extern "C" fn toplevel_close(data: *mut std::ffi::c_void, _toplevel: *mut xdg_toplevel) {
@@ -1965,6 +2136,66 @@ mod xdg {
                 args.as_mut_ptr(),
             );
         }
+    }
+}
+
+mod wp_alpha {
+    use crate::wl;
+
+    const MODIFIER_V1_GET_SURFACE: u32 = 1;
+    const MODIFIER_SURFACE_V1_SET_MULTIPLIER: u32 = 1;
+
+    #[repr(C)]
+    pub struct wp_alpha_modifier_v1 {
+        _data: (),
+        _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    }
+    #[repr(C)]
+    pub struct wp_alpha_modifier_surface_v1 {
+        _data: (),
+        _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    }
+
+    pub fn get_surface(
+        manager: *mut wp_alpha_modifier_v1,
+        surface: *mut wl::wl_surface,
+    ) -> *mut wp_alpha_modifier_surface_v1 {
+        let proxy = manager as *mut wl::wl_proxy;
+        unsafe {
+            let mut args: [wl::wl_argument; 10] = std::mem::zeroed();
+            args[0].n = 0;
+            args[1].o = surface as *mut wl::wl_object;
+            wl::wl_proxy_marshal_array_flags(
+                proxy,
+                MODIFIER_V1_GET_SURFACE,
+                &wp_alpha_modifier_surface_v1_interface,
+                wl::wl_proxy_get_version(proxy),
+                0,
+                args.as_mut_ptr(),
+            ) as *mut _
+        }
+    }
+
+    pub fn set_multiplier(surface: *mut wp_alpha_modifier_surface_v1, factor: u32) {
+        let proxy = surface as *mut wl::wl_proxy;
+        unsafe {
+            let mut args: [wl::wl_argument; 10] = std::mem::zeroed();
+            args[0].u = factor;
+            wl::wl_proxy_marshal_array_flags(
+                proxy,
+                MODIFIER_SURFACE_V1_SET_MULTIPLIER,
+                std::ptr::null(),
+                wl::wl_proxy_get_version(proxy),
+                0,
+                args.as_mut_ptr(),
+            );
+        }
+    }
+
+    #[link(name = "alpha-modifier-protocol", kind = "static")]
+    extern "C" {
+        pub static wp_alpha_modifier_v1_interface: wl::wl_interface;
+        pub static wp_alpha_modifier_surface_v1_interface: wl::wl_interface;
     }
 }
 
@@ -2592,6 +2823,10 @@ fn main() {
         xdg::toplevel_set_title(global_state.toplevel, "Handmade Hero\0");
         xdg::toplevel_add_listener(global_state.toplevel, &mut global_state);
 
+        debug_assert!(!global_state.compositor.is_null());
+        global_state.alpha_surface =
+            wp_alpha::get_surface(global_state.alpha, global_state.surface);
+
         wl::surface_commit(global_state.surface);
         linux::resize_shared_buffer(&mut global_state, 1280, 720);
 
@@ -2615,6 +2850,8 @@ fn main() {
         .unwrap();
         pw::init_pipewire_sound(&mut sound_output);
 
+        let mut linux_state = linux::State::default();
+        global_state.linux_state = &mut linux_state as *mut _;
         global_state.running = true;
 
         #[cfg(any())]
@@ -2626,7 +2863,7 @@ fn main() {
         }
 
         let permanent_storage_size = megabytes!(64);
-        let transient_storage_size = gigabytes!(4);
+        let transient_storage_size = gigabytes!(1);
         let base_address = if cfg!(HANDMADE_INTERNAL) {
             terabytes!(2)
         } else {
@@ -2637,16 +2874,26 @@ fn main() {
             permanent_storage_size + transient_storage_size,
             base_address,
         );
-        if let Ok(mut allocated_memory) = allocated_memory {
-            let (permanent_storage, transient_storage) = allocated_memory
-                .as_slice_mut()
-                .split_at_mut(permanent_storage_size as usize);
+        if let Ok(allocated_memory) = allocated_memory {
             let mut game_memory = handmade::game::Memory::default();
-            game_memory.permanent_storage_memory = permanent_storage.as_mut_ptr();
-            game_memory.transient_storage_size = transient_storage.len();
+            game_memory.transient_storage_size = transient_storage_size as usize;
+            game_memory.permanent_storage_size = permanent_storage_size as usize;
             game_memory.read_entire_file_stub = Some(debug_platform::read_entire_file);
             game_memory.write_entire_file_stub = Some(debug_platform::write_entire_file);
             game_memory.free_file_memory_stub = Some(debug_platform::free_file_memory);
+
+            linux_state.game_memory = allocated_memory;
+
+            (
+                game_memory.permanent_storage_memory,
+                game_memory.transient_storage_memory,
+            ) = {
+                let (permanent, transient) = linux_state
+                    .game_memory
+                    .as_slice_mut()
+                    .split_at_mut(game_memory.permanent_storage_size);
+                (permanent.as_mut_ptr(), transient.as_mut_ptr())
+            };
 
             let mut inputs = [handmade::game::Input::default(); 2];
             let controllers = libevdev::get_controllers();
@@ -2689,16 +2936,7 @@ fn main() {
                 }
                 new_keyboard_controller.is_connected = old_keyboard_controller.is_connected;
 
-                loop {
-                    let dispatched_events = wl::dispatch_pending_events(display, 0);
-                    if dispatched_events == -1 {
-                        global_state.running = false;
-                        break;
-                    } else if global_state.buffer_released && dispatched_events == 0 {
-                        break;
-                    } else {
-                    }
-                }
+                linux::process_pending_events(&mut global_state, display);
 
                 if !global_state.pause {
                     for controller_index in 0..max_controller_count {
@@ -2786,7 +3024,7 @@ fn main() {
                                 controllers[controller_index],
                                 libevdev::ABS_X,
                             );
-                            new_controller.stick_average_y = linux::process_input_stick_value(
+                            new_controller.stick_average_y = -linux::process_input_stick_value(
                                 controllers[controller_index],
                                 libevdev::ABS_Y,
                             );
@@ -2836,12 +3074,12 @@ fn main() {
                             );
                             linux::process_input_digital_button(
                                 old_controller.move_up(),
-                                (new_controller.stick_average_y < -threshold) as i32,
+                                (new_controller.stick_average_y > threshold) as i32,
                                 new_controller.move_up(),
                             );
                             linux::process_input_digital_button(
                                 old_controller.move_down(),
-                                (new_controller.stick_average_y > threshold) as i32,
+                                (new_controller.stick_average_y < -threshold) as i32,
                                 new_controller.move_down(),
                             );
                         } else {
@@ -2849,13 +3087,19 @@ fn main() {
                         }
                     }
 
-                    let buffer = handmade::game::OffscreenBuffer {
-                        memory: global_state.back_buffer.memory.addr,
-                        width: global_state.back_buffer.width,
-                        height: global_state.back_buffer.height,
-                        pitch: global_state.back_buffer.pitch,
-                        bytes_per_pixel: global_state.back_buffer.bytes_per_pixel,
-                    };
+                    let mut buffer = handmade::game::OffscreenBuffer::default();
+                    buffer.memory = global_state.back_buffer.memory.addr;
+                    buffer.width = global_state.back_buffer.width;
+                    buffer.height = global_state.back_buffer.height;
+                    buffer.pitch = global_state.back_buffer.pitch;
+                    buffer.bytes_per_pixel = global_state.back_buffer.bytes_per_pixel;
+
+                    if linux_state.input_recording_index == 1 {
+                        linux::record_input(&mut linux_state, new_input.clone());
+                    }
+                    if linux_state.input_playing_index == 1 {
+                        linux::play_back_input(&mut linux_state, new_input);
+                    }
 
                     game.update_and_render(&mut game_memory, new_input.clone(), buffer);
 
@@ -2931,7 +3175,7 @@ fn main() {
                             bytes_to_write as i32 / sound_output.bytes_per_sample;
                         sound_buffer.bytes_per_sample = sound_output.bytes_per_sample;
                         sound_buffer.memory = samples.addr;
-                        game.get_sound_samples(&mut game_memory, &mut sound_buffer);
+                        game.get_sound_samples(&mut game_memory, &sound_buffer);
 
                         #[cfg(HANDMADE_INTERNAL)]
                         {
