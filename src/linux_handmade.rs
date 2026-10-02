@@ -23,9 +23,12 @@ macro_rules! terabytes {
 
 #[cfg(HANDMADE_INTERNAL)]
 mod debug_platform {
-    use crate::linux;
+    use crate::{handmade, linux};
 
-    pub fn read_entire_file(filename: &str) -> Option<(*mut (), i64)> {
+    pub fn read_entire_file(
+        _thread: &handmade::game::Thread,
+        filename: &str,
+    ) -> Option<(*mut (), i64)> {
         debug_assert!(filename.ends_with('\0'));
         unsafe {
             let fd = linux::open(
@@ -56,7 +59,12 @@ mod debug_platform {
         None
     }
 
-    pub fn write_entire_file(filename: &str, memory: *mut (), memory_size: i64) -> bool {
+    pub fn write_entire_file(
+        _thread: &handmade::game::Thread,
+        filename: &str,
+        memory: *mut (),
+        memory_size: i64,
+    ) -> bool {
         debug_assert!(filename.ends_with('\0'));
         unsafe {
             let fd = linux::open(
@@ -92,7 +100,7 @@ mod debug_platform {
         false
     }
 
-    pub fn free_file_memory(memory: *mut (), size: i64) {
+    pub fn free_file_memory(_thread: &handmade::game::Thread, memory: *mut (), size: i64) {
         unsafe { linux::munmap(memory as *mut std::ffi::c_void, size as usize) };
     }
 }
@@ -117,15 +125,25 @@ mod linux {
         DOWN = 108,
     }
 
+    pub enum MouseBtn {
+        LEFT = 0x110,
+        RIGHT = 0x111,
+        MIDDLE = 0x112,
+        SIDE = 0x113,
+        EXTRA = 0x114,
+    }
+
     #[derive(Default)]
     pub struct GlobalState {
         pub compositor: *mut wl::wl_compositor,
         pub shm: *mut wl::wl_shm,
         pub surface: *mut wl::wl_surface,
         pub buffer: *mut wl::wl_buffer,
+        pub output: *mut wl::wl_output,
 
         pub seat: *mut wl::wl_seat,
         pub keyboard: *mut wl::wl_keyboard,
+        pub pointer: *mut wl::wl_pointer,
 
         pub window_manager: *mut xdg::xdg_wm_base,
         pub window: *mut xdg::xdg_surface,
@@ -142,6 +160,7 @@ mod linux {
         pub back_buffer: OffscreenBuffer,
 
         pub linux_state: *mut State,
+        pub refresh_rate: i32,
     }
 
     #[derive(Default)]
@@ -221,9 +240,10 @@ mod linux {
     }
 
     pub fn process_keyboard_message(new_state: &mut handmade::game::ButtonState, is_down: bool) {
-        debug_assert!(new_state.ended_down != is_down);
-        new_state.ended_down = is_down;
-        new_state.half_transition_count += 1;
+        if new_state.ended_down != is_down {
+            new_state.ended_down = is_down;
+            new_state.half_transition_count += 1;
+        }
     }
 
     pub fn process_input_digital_button(
@@ -265,7 +285,7 @@ mod linux {
             - last_counter.tv_nsec as f64 / 1e9
     }
 
-    pub fn debug_sync_display(
+    pub fn _debug_sync_display(
         back_buffer: &mut OffscreenBuffer,
         sound_output: &SoundOutput,
         current_marker_index: usize,
@@ -313,7 +333,7 @@ mod linux {
 
                 let first_top = top;
 
-                debug_draw_sound_buffer_marker(
+                _debug_draw_sound_buffer_marker(
                     back_buffer,
                     c,
                     pad_x,
@@ -322,7 +342,7 @@ mod linux {
                     debug_time_marker.output_play_cursor,
                     play_color,
                 );
-                debug_draw_sound_buffer_marker(
+                _debug_draw_sound_buffer_marker(
                     back_buffer,
                     c,
                     pad_x,
@@ -335,7 +355,7 @@ mod linux {
                 top += line_height + pad_y;
                 bottom += line_height + pad_y;
 
-                debug_draw_sound_buffer_marker(
+                _debug_draw_sound_buffer_marker(
                     back_buffer,
                     c,
                     pad_x,
@@ -344,7 +364,7 @@ mod linux {
                     debug_time_marker.output_location,
                     play_color,
                 );
-                debug_draw_sound_buffer_marker(
+                _debug_draw_sound_buffer_marker(
                     back_buffer,
                     c,
                     pad_x,
@@ -357,7 +377,7 @@ mod linux {
                 top += line_height + pad_y;
                 bottom += line_height + pad_y;
 
-                debug_draw_sound_buffer_marker(
+                _debug_draw_sound_buffer_marker(
                     back_buffer,
                     c,
                     pad_x,
@@ -368,7 +388,7 @@ mod linux {
                 );
             }
 
-            debug_draw_sound_buffer_marker(
+            _debug_draw_sound_buffer_marker(
                 back_buffer,
                 c,
                 pad_x,
@@ -377,7 +397,7 @@ mod linux {
                 debug_time_marker.flip_play_cursor,
                 play_color,
             );
-            debug_draw_sound_buffer_marker(
+            _debug_draw_sound_buffer_marker(
                 back_buffer,
                 c,
                 pad_x,
@@ -386,7 +406,7 @@ mod linux {
                 debug_time_marker.flip_play_cursor + 256 * sound_output.bytes_per_sample as u32,
                 play_window_color,
             );
-            debug_draw_sound_buffer_marker(
+            _debug_draw_sound_buffer_marker(
                 back_buffer,
                 c,
                 pad_x,
@@ -398,7 +418,7 @@ mod linux {
         }
     }
 
-    fn debug_draw_sound_buffer_marker(
+    fn _debug_draw_sound_buffer_marker(
         back_buffer: &mut OffscreenBuffer,
         c: f32,
         pad_x: i32,
@@ -409,10 +429,10 @@ mod linux {
     ) {
         let x_f32 = c * value as f32;
         let x = pad_x + x_f32 as i32;
-        debug_draw_vertical(back_buffer, x, top, bottom, color);
+        _debug_draw_vertical(back_buffer, x, top, bottom, color);
     }
 
-    fn debug_draw_vertical(
+    fn _debug_draw_vertical(
         back_buffer: &mut OffscreenBuffer,
         x: i32,
         mut top: i32,
@@ -451,23 +471,25 @@ mod linux {
     impl GameCode {
         pub fn update_and_render(
             &self,
+            thread: &handmade::game::Thread,
             memory: &mut handmade::game::Memory,
             inputs: handmade::game::Input,
             buffer: handmade::game::OffscreenBuffer,
         ) {
             if let Some(func) = self.update_and_render_stub {
-                func(memory, inputs, buffer)
+                func(thread, memory, inputs, buffer)
             } else {
             }
         }
 
         pub fn get_sound_samples(
             &self,
+            thread: &handmade::game::Thread,
             memory: &mut handmade::game::Memory,
             sound_buffer: &handmade::game::SoundBuffer,
         ) {
             if let Some(func) = self.get_sound_samples_stub {
-                func(memory, sound_buffer)
+                func(thread, memory, sound_buffer)
             } else {
             }
         }
@@ -551,11 +573,12 @@ mod linux {
     pub const S_IRGRP: i64 = S_IRUSR >> 3;
     pub const S_IROTH: i64 = S_IRGRP >> 3;
 
+    pub const _SEEK_SET: i32 = 0;
     pub const SEEK_END: i32 = 2;
 
     pub const RTLD_NOW: i32 = 0x00002;
 
-    #[derive(Default)]
+    #[derive(Default, Clone, Copy)]
     pub struct MemFd {
         pub fd: i32,
         pub addr: *mut u8,
@@ -780,6 +803,7 @@ mod linux {
         ) -> isize;
     }
 
+    #[derive(Clone, Copy)]
     pub struct StateFileName([u8; 256]);
     impl Default for StateFileName {
         fn default() -> Self {
@@ -787,9 +811,16 @@ mod linux {
         }
     }
 
+    #[derive(Default, Clone, Copy)]
+    pub struct ReplayBuffer {
+        pub filename: StateFileName,
+        pub memory_block: MemFd,
+    }
+
     #[derive(Default)]
     pub struct State {
         pub game_memory: MemFd,
+        pub replay_buffers: [ReplayBuffer; 4],
 
         pub recording_fd: i32,
         pub input_recording_index: i32,
@@ -807,46 +838,52 @@ mod linux {
         fn write(fd: std::ffi::c_int, buf: *mut std::ffi::c_void, size: usize) -> isize;
     }
 
-    pub fn begin_record_input(state: &mut State, input_recording_index: i32) {
-        state.input_recording_index = input_recording_index;
-
-        let mut filename = StateFileName::default();
-        get_input_file_location(state, input_recording_index, &mut filename);
-        unsafe {
-            state.recording_fd = open(
-                filename.0.as_ptr() as *const std::ffi::c_void,
-                O_RDWR | O_CREAT | O_TRUNC,
-                S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH,
-            );
-            let _ = write(
-                state.recording_fd,
-                state.game_memory.addr as *mut _,
-                state.game_memory.size,
-            );
+    pub fn begin_recording_input(state: &mut State, input_recording_index: i32) {
+        if let Some(replay_buffer) = state.replay_buffers.get(input_recording_index as usize) {
+            state.input_recording_index = input_recording_index;
+            let mut filename = StateFileName::default();
+            get_input_file_location(state, true, input_recording_index, &mut filename);
+            unsafe {
+                state.recording_fd = open(
+                    filename.0.as_ptr() as *const std::ffi::c_void,
+                    O_RDWR | O_CREAT | O_TRUNC,
+                    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH,
+                );
+                #[cfg(any())]
+                lseek(replay_buffer.memory_block.fd, 0, _SEEK_SET);
+                std::ptr::copy_nonoverlapping(
+                    state.game_memory.addr,
+                    replay_buffer.memory_block.addr,
+                    state.game_memory.size,
+                );
+            }
         }
     }
 
-    pub fn end_record_input(state: &mut State) {
+    pub fn end_recording_input(state: &mut State) {
         unsafe { close(state.recording_fd) };
         state.input_recording_index = 0;
     }
 
     pub fn begin_input_play_back(state: &mut State, input_playing_index: i32) {
-        state.input_playing_index = input_playing_index;
-
-        let mut filename = StateFileName::default();
-        get_input_file_location(state, input_playing_index, &mut filename);
-        unsafe {
-            state.play_back_fd = open(
-                filename.0.as_ptr() as *const std::ffi::c_void,
-                O_RDONLY,
-                S_IRUSR | S_IRGRP | S_IROTH,
-            );
-            let _ = read(
-                state.play_back_fd,
-                state.game_memory.addr as *mut _,
-                state.game_memory.size,
-            );
+        if let Some(replay_buffer) = state.replay_buffers.get(input_playing_index as usize) {
+            state.input_playing_index = input_playing_index;
+            let mut filename = StateFileName::default();
+            get_input_file_location(state, true, input_playing_index, &mut filename);
+            unsafe {
+                state.play_back_fd = open(
+                    filename.0.as_ptr() as *const std::ffi::c_void,
+                    O_RDONLY,
+                    S_IRUSR | S_IRGRP | S_IROTH,
+                );
+                #[cfg(any())]
+                lseek(replay_buffer.memory_block.fd, 0, _SEEK_SET);
+                std::ptr::copy_nonoverlapping(
+                    replay_buffer.memory_block.addr,
+                    state.game_memory.addr,
+                    replay_buffer.memory_block.size,
+                );
+            }
         }
     }
 
@@ -887,11 +924,22 @@ mod linux {
 
     pub fn get_input_file_location<'a>(
         state: &State,
+        input_stream: bool,
         slot_index: i32,
         dest: &'a mut StateFileName,
     ) -> &'a str {
-        debug_assert!(slot_index == 1);
-        build_exe_path_filename(state, "loop_edit.hmi", dest)
+        use std::io::Write;
+        let mut buffer = [0u8; 256];
+        let mut temp: &mut [u8] = &mut buffer;
+        write!(
+            temp,
+            "loop_edit_{}_{}.hmi\0",
+            slot_index,
+            if input_stream { "input" } else { "state" }
+        )
+        .expect("");
+        let length = buffer.iter().position(|&c| c == 0).unwrap();
+        build_exe_path_filename(state, std::str::from_utf8(&buffer[..length]).unwrap(), dest)
     }
 
     pub fn get_exe_filename(state: &mut State) {
@@ -914,6 +962,36 @@ mod linux {
             &mut dest.0,
         )
         .unwrap()
+    }
+
+    pub fn create_mapped_file(filename: &str, size: usize) -> Option<MemFd> {
+        unsafe {
+            let fd = open(
+                filename.as_ptr() as *const std::ffi::c_void,
+                O_RDWR | O_CREAT | O_TRUNC,
+                S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH,
+            );
+            if fd != -1 {
+                if ftruncate(fd, size as i64) != -1 {
+                    let result = mmap(
+                        std::ptr::null_mut(),
+                        size,
+                        PROT_WRITE | PROT_READ,
+                        MAP_SHARED,
+                        fd,
+                        0,
+                    ) as *mut u8;
+                    if result as i32 != MAP_FAILED {
+                        return Some(MemFd {
+                            fd: fd,
+                            addr: result,
+                            size: size,
+                        });
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -1181,16 +1259,23 @@ mod wl {
 
     const WL_MARSHAL_FLAG_DESTROY: u32 = 1;
 
+    const WL_SEAT_GET_POINTER: u32 = 0;
     const WL_SEAT_GET_KEYBOARD: u32 = 1;
 
     const WL_KEYBOARD_RELEASE: u32 = 0;
+    const WL_POINTER_RELEASE: u32 = 1;
 
     pub enum SHMFormat {
         XRGB8888 = 1,
     }
 
     enum SeatCapability {
+        POINTER = 1,
         KEYBOARD = 2,
+    }
+
+    enum OutputMode {
+        Current = 0x1,
     }
 
     pub fn display_connect(sock_name: &str) -> Option<*mut wl_display> {
@@ -1422,7 +1507,9 @@ mod wl {
         static wl_shm_pool_interface: wl_interface;
         static wl_buffer_interface: wl_interface;
         static wl_seat_interface: wl_interface;
+        static wl_pointer_interface: wl_interface;
         static wl_keyboard_interface: wl_interface;
+        static wl_output_interface: wl_interface;
 
         pub fn wl_proxy_get_version(proxy: *mut wl_proxy) -> std::ffi::c_uint;
         pub fn wl_proxy_marshal_array_flags(
@@ -1511,12 +1598,22 @@ mod wl {
         _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
     }
     #[repr(C)]
+    pub struct wl_output {
+        _data: (),
+        _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    }
+    #[repr(C)]
     pub struct wl_seat {
         _data: (),
         _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
     }
     #[repr(C)]
     pub struct wl_keyboard {
+        _data: (),
+        _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    }
+    #[repr(C)]
+    pub struct wl_pointer {
         _data: (),
         _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
     }
@@ -1621,6 +1718,130 @@ mod wl {
             ),
         >,
     }
+    type WlFixedT = std::ffi::c_int;
+    #[repr(C)]
+    struct wl_pointer_listener {
+        enter: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut wl_pointer,
+                std::ffi::c_uint,
+                *mut wl_surface,
+                WlFixedT,
+                WlFixedT,
+            ),
+        >,
+        leave: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut wl_pointer,
+                std::ffi::c_uint,
+                *mut wl_surface,
+            ),
+        >,
+        motion: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut wl_pointer,
+                std::ffi::c_uint,
+                WlFixedT,
+                WlFixedT,
+            ),
+        >,
+        button: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut wl_pointer,
+                std::ffi::c_uint,
+                std::ffi::c_uint,
+                std::ffi::c_uint,
+                std::ffi::c_uint,
+            ),
+        >,
+        axis: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut wl_pointer,
+                std::ffi::c_uint,
+                std::ffi::c_uint,
+                WlFixedT,
+            ),
+        >,
+        frame: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut wl_pointer)>,
+        axis_source:
+            Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut wl_pointer, std::ffi::c_uint)>,
+        axis_stop: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut wl_pointer,
+                std::ffi::c_uint,
+                std::ffi::c_uint,
+            ),
+        >,
+        axis_discrete: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut wl_pointer,
+                std::ffi::c_uint,
+                std::ffi::c_int,
+            ),
+        >,
+        axis_value120: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut wl_pointer,
+                std::ffi::c_uint,
+                std::ffi::c_int,
+            ),
+        >,
+        axis_relative_direction: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut wl_pointer,
+                std::ffi::c_uint,
+                std::ffi::c_uint,
+            ),
+        >,
+        warp: Option<
+            unsafe extern "C" fn(*mut std::ffi::c_void, *mut wl_pointer, WlFixedT, WlFixedT),
+        >,
+    }
+
+    #[repr(C)]
+    struct wl_output_listener {
+        geometry: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut wl_output,
+                std::ffi::c_int,
+                std::ffi::c_int,
+                std::ffi::c_int,
+                std::ffi::c_int,
+                std::ffi::c_int,
+                *const std::ffi::c_char,
+                *const std::ffi::c_char,
+                std::ffi::c_int,
+            ),
+        >,
+        mode: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut wl_output,
+                std::ffi::c_uint,
+                std::ffi::c_int,
+                std::ffi::c_int,
+                std::ffi::c_int,
+            ),
+        >,
+        done: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut wl_output)>,
+        scale: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut wl_output, std::ffi::c_int)>,
+        name: Option<
+            unsafe extern "C" fn(*mut std::ffi::c_void, *mut wl_output, *const std::ffi::c_char),
+        >,
+        description: Option<
+            unsafe extern "C" fn(*mut std::ffi::c_void, *mut wl_output, *const std::ffi::c_char),
+        >,
+    }
 
     #[no_mangle]
     static mut registry_listener: wl_registry_listener = wl_registry_listener {
@@ -1644,6 +1865,30 @@ mod wl {
         key: Some(keyboard_key),
         modifiers: Some(keyboard_modifiers),
         repeat_info: Some(keyboard_repeat_info),
+    };
+    #[no_mangle]
+    static mut pointer_listener: wl_pointer_listener = wl_pointer_listener {
+        enter: Some(pointer_enter),
+        leave: Some(pointer_leave),
+        motion: Some(pointer_motion),
+        button: Some(pointer_button),
+        axis: Some(pointer_axis),
+        frame: Some(pointer_frame),
+        axis_source: Some(pointer_axis_source),
+        axis_stop: Some(pointer_axis_stop),
+        axis_discrete: Some(pointer_axis_discrete),
+        axis_value120: Some(pointer_axis_value120),
+        axis_relative_direction: Some(pointer_axis_relative_direction),
+        warp: Some(pointer_warp),
+    };
+    #[no_mangle]
+    static mut output_listener: wl_output_listener = wl_output_listener {
+        geometry: Some(output_geometry),
+        mode: Some(output_mode),
+        done: Some(output_done),
+        scale: Some(output_scale),
+        name: Some(output_name),
+        description: Some(output_description),
     };
 
     unsafe extern "C" fn registry_global(
@@ -1674,6 +1919,10 @@ mod wl {
             global_state.seat =
                 registry_bind(registry, name, &wl_seat_interface, version) as *mut wl::wl_seat;
             seat_add_listener(global_state.seat, data.cast::<linux::GlobalState>());
+        } else if interface == std::ffi::CStr::from_ptr(wl_output_interface.name) {
+            global_state.output =
+                registry_bind(registry, name, &wl_output_interface, version) as *mut wl::wl_output;
+            output_add_listener(global_state.output, data.cast::<linux::GlobalState>());
         } else if interface
             == std::ffi::CStr::from_ptr(wp_alpha::wp_alpha_modifier_v1_interface.name)
         {
@@ -1697,6 +1946,7 @@ mod wl {
         capabilities: std::ffi::c_uint,
     ) {
         let global_state = &mut *data.cast::<linux::GlobalState>();
+
         let has_keyboard = (capabilities & SeatCapability::KEYBOARD as u32) != 0;
         if has_keyboard && global_state.keyboard.is_null() {
             global_state.keyboard = seat_get_keyboard(global_state.seat);
@@ -1704,6 +1954,15 @@ mod wl {
         } else if !has_keyboard && !global_state.keyboard.is_null() {
             keyboard_release(global_state.keyboard);
             global_state.keyboard = std::ptr::null_mut();
+        }
+
+        let has_pointer = (capabilities & SeatCapability::POINTER as u32) != 0;
+        if has_pointer && global_state.pointer.is_null() {
+            global_state.pointer = seat_get_pointer(global_state.seat);
+            pointer_add_listener(global_state.pointer, global_state);
+        } else if !has_pointer && !global_state.pointer.is_null() {
+            pointer_release(global_state.pointer);
+            global_state.pointer = std::ptr::null_mut();
         }
     }
 
@@ -1784,15 +2043,18 @@ mod wl {
         } else if key == linux::KeyCode::L as u32 {
             let linux_state = &mut (*global_state.linux_state);
             if is_down {
-                if linux_state.input_recording_index == 0 {
-                    linux::begin_record_input(linux_state, 1);
+                if linux_state.input_playing_index == 0 {
+                    if linux_state.input_recording_index == 0 {
+                        linux::begin_recording_input(linux_state, 1);
+                    } else {
+                        linux::end_recording_input(linux_state);
+                        linux::begin_input_play_back(linux_state, 1);
+                    }
                 } else {
-                    linux::end_record_input(linux_state);
-                    linux::begin_input_play_back(linux_state, 1);
+                    linux::end_input_play_back(linux_state);
                 }
             }
         } else {
-            println!("key:{}", key);
         }
     }
 
@@ -1812,6 +2074,171 @@ mod wl {
         _keyboard: *mut wl_keyboard,
         _rate: std::ffi::c_int,
         _delay: std::ffi::c_int,
+    ) {
+    }
+
+    unsafe extern "C" fn pointer_enter(
+        _data: *mut std::ffi::c_void,
+        _pointer: *mut wl_pointer,
+        _serial: std::ffi::c_uint,
+        _surface: *mut wl_surface,
+        _surface_x: WlFixedT,
+        _surface_y: WlFixedT,
+    ) {
+    }
+
+    unsafe extern "C" fn pointer_leave(
+        _data: *mut std::ffi::c_void,
+        _pointer: *mut wl_pointer,
+        _serial: std::ffi::c_uint,
+        _surface: *mut wl_surface,
+    ) {
+    }
+
+    unsafe extern "C" fn pointer_motion(
+        data: *mut std::ffi::c_void,
+        _pointer: *mut wl_pointer,
+        _time: std::ffi::c_uint,
+        surface_x: WlFixedT,
+        surface_y: WlFixedT,
+    ) {
+        let global_state = &mut *data.cast::<linux::GlobalState>();
+        (*global_state.game_input).mouse_x = (surface_x + 128) >> 8;
+        (*global_state.game_input).mouse_y = (surface_y + 128) >> 8;
+        (*global_state.game_input).mouse_z = 0;
+    }
+
+    unsafe extern "C" fn pointer_button(
+        data: *mut std::ffi::c_void,
+        _pointer: *mut wl_pointer,
+        _serial: std::ffi::c_uint,
+        _time: std::ffi::c_uint,
+        button: std::ffi::c_uint,
+        state: std::ffi::c_uint,
+    ) {
+        let global_state = &mut *data.cast::<linux::GlobalState>();
+        let mouse_buttons = &mut (*global_state.game_input).mouse_buttons;
+
+        let is_down = state == 1;
+        if button == linux::MouseBtn::LEFT as u32 {
+            linux::process_keyboard_message(&mut mouse_buttons[0], is_down);
+        } else if button == linux::MouseBtn::MIDDLE as u32 {
+            linux::process_keyboard_message(&mut mouse_buttons[1], is_down);
+        } else if button == linux::MouseBtn::RIGHT as u32 {
+            linux::process_keyboard_message(&mut mouse_buttons[2], is_down);
+        } else if button == linux::MouseBtn::EXTRA as u32 {
+            linux::process_keyboard_message(&mut mouse_buttons[3], is_down);
+        } else if button == linux::MouseBtn::SIDE as u32 {
+            linux::process_keyboard_message(&mut mouse_buttons[4], is_down);
+        }
+    }
+
+    unsafe extern "C" fn pointer_axis(
+        _data: *mut std::ffi::c_void,
+        _pointer: *mut wl_pointer,
+        _time: std::ffi::c_uint,
+        _axis: std::ffi::c_uint,
+        _value: WlFixedT,
+    ) {
+    }
+
+    unsafe extern "C" fn pointer_frame(_data: *mut std::ffi::c_void, _pointer: *mut wl_pointer) {}
+
+    unsafe extern "C" fn pointer_axis_source(
+        _data: *mut std::ffi::c_void,
+        _pointer: *mut wl_pointer,
+        _axis_source: std::ffi::c_uint,
+    ) {
+    }
+
+    unsafe extern "C" fn pointer_axis_stop(
+        _data: *mut std::ffi::c_void,
+        _pointer: *mut wl_pointer,
+        _time: std::ffi::c_uint,
+        _axis: std::ffi::c_uint,
+    ) {
+    }
+
+    unsafe extern "C" fn pointer_axis_discrete(
+        _data: *mut std::ffi::c_void,
+        _pointer: *mut wl_pointer,
+        _axis: std::ffi::c_uint,
+        _discrete: std::ffi::c_int,
+    ) {
+    }
+
+    unsafe extern "C" fn pointer_axis_value120(
+        _data: *mut std::ffi::c_void,
+        _pointer: *mut wl_pointer,
+        _axis: std::ffi::c_uint,
+        _value120: std::ffi::c_int,
+    ) {
+    }
+
+    unsafe extern "C" fn pointer_axis_relative_direction(
+        _data: *mut std::ffi::c_void,
+        _pointer: *mut wl_pointer,
+        _axis: std::ffi::c_uint,
+        _direction: std::ffi::c_uint,
+    ) {
+    }
+
+    unsafe extern "C" fn pointer_warp(
+        _data: *mut std::ffi::c_void,
+        _pointer: *mut wl_pointer,
+        _surface_x: WlFixedT,
+        _surface_y: WlFixedT,
+    ) {
+    }
+
+    unsafe extern "C" fn output_geometry(
+        _data: *mut std::ffi::c_void,
+        _output: *mut wl_output,
+        _x: std::ffi::c_int,
+        _y: std::ffi::c_int,
+        _physical_width: std::ffi::c_int,
+        _physical_height: std::ffi::c_int,
+        _subpixel: std::ffi::c_int,
+        _make: *const std::ffi::c_char,
+        _model: *const std::ffi::c_char,
+        _transform: std::ffi::c_int,
+    ) {
+    }
+
+    unsafe extern "C" fn output_mode(
+        data: *mut std::ffi::c_void,
+        _output: *mut wl_output,
+        flags: std::ffi::c_uint,
+        _width: std::ffi::c_int,
+        _height: std::ffi::c_int,
+        refresh: std::ffi::c_int,
+    ) {
+        let global_state = &mut *data.cast::<linux::GlobalState>();
+        if flags & OutputMode::Current as u32 != 0 {
+            global_state.refresh_rate = refresh / 1e3 as i32;
+        }
+    }
+
+    unsafe extern "C" fn output_done(_data: *mut std::ffi::c_void, _output: *mut wl_output) {}
+
+    unsafe extern "C" fn output_scale(
+        _data: *mut std::ffi::c_void,
+        _output: *mut wl_output,
+        _factor: std::ffi::c_int,
+    ) {
+    }
+
+    unsafe extern "C" fn output_name(
+        _data: *mut std::ffi::c_void,
+        _output: *mut wl_output,
+        _name: *const std::ffi::c_char,
+    ) {
+    }
+
+    unsafe extern "C" fn output_description(
+        _data: *mut std::ffi::c_void,
+        _output: *mut wl_output,
+        _description: *const std::ffi::c_char,
     ) {
     }
 
@@ -1884,6 +2311,59 @@ mod wl {
                 wl_proxy_get_version(proxy),
                 WL_MARSHAL_FLAG_DESTROY,
                 std::ptr::null_mut() as *mut wl_argument,
+            )
+        }
+    }
+
+    fn seat_get_pointer(seat: *mut wl_seat) -> *mut wl_pointer {
+        let proxy = seat as *mut wl_proxy;
+        unsafe {
+            let mut args: [wl_argument; 10] = std::mem::zeroed();
+            args[0].n = 0;
+            wl_proxy_marshal_array_flags(
+                proxy,
+                WL_SEAT_GET_POINTER,
+                &wl_pointer_interface,
+                wl_proxy_get_version(proxy),
+                0,
+                args.as_mut_ptr(),
+            ) as *mut wl_pointer
+        }
+    }
+
+    fn pointer_add_listener(pointer: *mut wl_pointer, global_state: *mut linux::GlobalState) {
+        unsafe {
+            wl_proxy_add_listener(
+                pointer as *mut wl_proxy,
+                std::ptr::addr_of_mut!(pointer_listener).cast::<linux::ListenerImplementation>(),
+                global_state as *mut std::ffi::c_void,
+            );
+        }
+    }
+
+    fn pointer_release(pointer: *mut wl_pointer) -> *mut wl_proxy {
+        let proxy = pointer as *mut wl_proxy;
+        unsafe {
+            wl_proxy_marshal_array_flags(
+                proxy,
+                WL_POINTER_RELEASE,
+                std::ptr::null(),
+                wl_proxy_get_version(proxy),
+                WL_MARSHAL_FLAG_DESTROY,
+                std::ptr::null_mut() as *mut wl_argument,
+            )
+        }
+    }
+
+    fn output_add_listener(
+        output: *mut wl_output,
+        global_state: *mut linux::GlobalState,
+    ) -> std::ffi::c_int {
+        unsafe {
+            wl_proxy_add_listener(
+                output as *mut wl_proxy,
+                std::ptr::addr_of_mut!(output_listener).cast::<linux::ListenerImplementation>(),
+                global_state as *mut std::ffi::c_void,
             )
         }
     }
@@ -2839,10 +3319,6 @@ fn main() {
     global_state.running = true;
     global_state.back_buffer.bytes_per_pixel = std::mem::size_of::<i32>() as i32;
 
-    const MONITOR_REFRESH_HZ: usize = 60;
-    const GAME_UPDATE_HZ: usize = MONITOR_REFRESH_HZ / 2;
-    let target_seconds_per_frame = 1. / GAME_UPDATE_HZ as f64;
-
     if let Some(display) = wl::display_connect("") {
         let registry = wl::display_get_registry(display);
         wl::registry_add_listener(registry, &mut global_state);
@@ -2853,17 +3329,26 @@ fn main() {
         global_state.window =
             xdg::wm_get_xdg_surface(global_state.window_manager, global_state.surface);
         xdg::surface_add_listener(global_state.window, &mut global_state);
+        wl::display_roundtrip(display);
 
         global_state.toplevel = xdg::surface_get_toplevel(global_state.window);
         xdg::toplevel_set_title(global_state.toplevel, "Handmade Hero\0");
         xdg::toplevel_add_listener(global_state.toplevel, &mut global_state);
 
-        debug_assert!(!global_state.compositor.is_null());
+        debug_assert!(!global_state.alpha.is_null());
         global_state.alpha_surface =
             wp_alpha::get_surface(global_state.alpha, global_state.surface);
 
         wl::surface_commit(global_state.surface);
         linux::resize_shared_buffer(&mut global_state, 1280, 720);
+
+        let monitor_refresh_hz = if global_state.refresh_rate > 0 {
+            global_state.refresh_rate
+        } else {
+            60
+        };
+        let game_update_hz = monitor_refresh_hz as f32 / 2.;
+        let target_seconds_per_frame = 1. / game_update_hz as f64;
 
         let mut sound_output = linux::SoundOutput::default();
         sound_output.samples_per_second = 48000;
@@ -2875,7 +3360,8 @@ fn main() {
             0,
         )
         .unwrap();
-        sound_output.safety_bytes = ((sound_output.samples_per_second / GAME_UPDATE_HZ as i32) / 3)
+        sound_output.safety_bytes = ((sound_output.samples_per_second as f32 / game_update_hz) / 3.)
+            as i32
             * sound_output.bytes_per_sample;
         let samples = linux::memfd_alloc(
             "handmade-samples\0",
@@ -2896,28 +3382,27 @@ fn main() {
             }
         }
 
-        let permanent_storage_size = megabytes!(64);
-        let transient_storage_size = gigabytes!(1);
         let base_address = if cfg!(HANDMADE_INTERNAL) {
             terabytes!(2)
         } else {
             0
         };
+
+        let mut game_memory = handmade::game::Memory::default();
+        game_memory.transient_storage_size = megabytes!(64);
+        game_memory.permanent_storage_size = gigabytes!(1);
+        game_memory.read_entire_file_stub = Some(debug_platform::read_entire_file);
+        game_memory.write_entire_file_stub = Some(debug_platform::write_entire_file);
+        game_memory.free_file_memory_stub = Some(debug_platform::free_file_memory);
+
         let allocated_memory = linux::memfd_alloc(
             "\0",
-            permanent_storage_size + transient_storage_size,
+            game_memory.permanent_storage_size as i64 + game_memory.transient_storage_size as i64,
             base_address,
         );
+
         if let Ok(allocated_memory) = allocated_memory {
-            let mut game_memory = handmade::game::Memory::default();
-            game_memory.transient_storage_size = transient_storage_size as usize;
-            game_memory.permanent_storage_size = permanent_storage_size as usize;
-            game_memory.read_entire_file_stub = Some(debug_platform::read_entire_file);
-            game_memory.write_entire_file_stub = Some(debug_platform::write_entire_file);
-            game_memory.free_file_memory_stub = Some(debug_platform::free_file_memory);
-
             linux_state.game_memory = allocated_memory;
-
             (
                 game_memory.permanent_storage_memory,
                 game_memory.transient_storage_memory,
@@ -2929,6 +3414,19 @@ fn main() {
                 (permanent.as_mut_ptr(), transient.as_mut_ptr())
             };
 
+            let mut replay_buffers = [linux::ReplayBuffer::default(); 4];
+            for (replay_index, replay) in replay_buffers.iter_mut().enumerate() {
+                let filename = linux::get_input_file_location(
+                    &linux_state,
+                    false,
+                    replay_index as i32,
+                    &mut replay.filename,
+                );
+                replay.memory_block =
+                    linux::create_mapped_file(filename, linux_state.game_memory.size).unwrap();
+            }
+            linux_state.replay_buffers = replay_buffers;
+
             let mut inputs = [handmade::game::Input::default(); 2];
             let controllers = libevdev::get_controllers();
             let max_controller_count = controllers.iter().take_while(|dev| !dev.is_null()).count();
@@ -2938,7 +3436,7 @@ fn main() {
             let mut flip_wall_clock = linux::get_wall_clock().unwrap();
 
             let mut debug_time_marker_index = 0;
-            let mut debug_time_markers = [linux::DebugTimeMarker::default(); GAME_UPDATE_HZ / 2];
+            let mut debug_time_markers = [linux::DebugTimeMarker::default(); 30];
 
             let mut audio_latency_bytes;
             let mut audio_latency_seconds;
@@ -2969,6 +3467,17 @@ fn main() {
                     new_button.ended_down = old_button.ended_down;
                 }
                 new_keyboard_controller.is_connected = old_keyboard_controller.is_connected;
+                for (new_button, old_button) in new_input
+                    .mouse_buttons
+                    .iter_mut()
+                    .zip(&old_input.mouse_buttons)
+                {
+                    new_button.ended_down = old_button.ended_down;
+                    new_button.half_transition_count = 0;
+                }
+                new_input.mouse_x = old_input.mouse_x;
+                new_input.mouse_y = old_input.mouse_y;
+                new_input.mouse_z = old_input.mouse_z;
 
                 linux::process_pending_events(&mut global_state, display);
 
@@ -3132,6 +3641,8 @@ fn main() {
                         }
                     }
 
+                    let thread = handmade::game::Thread::default();
+
                     let mut buffer = handmade::game::OffscreenBuffer::default();
                     buffer.memory = global_state.back_buffer.memory.addr;
                     buffer.width = global_state.back_buffer.width;
@@ -3146,7 +3657,7 @@ fn main() {
                         linux::play_back_input(&mut linux_state, new_input);
                     }
 
-                    game.update_and_render(&mut game_memory, new_input.clone(), buffer);
+                    game.update_and_render(&thread, &mut game_memory, new_input.clone(), buffer);
 
                     let audio_wall_clock = linux::get_wall_clock().unwrap();
                     let from_begin_to_audio_seconds =
@@ -3177,7 +3688,7 @@ fn main() {
                             running_byte_index % sound_output.secondary_buffer.size as u32;
 
                         let expected_sound_bytes_per_frame =
-                            (sound_output.samples_per_second as u32 / GAME_UPDATE_HZ as u32)
+                            (sound_output.samples_per_second as u32 / game_update_hz as u32)
                                 * sound_output.bytes_per_sample as u32;
                         let seconds_left_until_flip =
                             target_seconds_per_frame - from_begin_to_audio_seconds;
@@ -3220,7 +3731,7 @@ fn main() {
                             bytes_to_write as i32 / sound_output.bytes_per_sample;
                         sound_buffer.bytes_per_sample = sound_output.bytes_per_sample;
                         sound_buffer.memory = samples.addr;
-                        game.get_sound_samples(&mut game_memory, &sound_buffer);
+                        game.get_sound_samples(&thread, &mut game_memory, &sound_buffer);
 
                         #[cfg(HANDMADE_INTERNAL)]
                         {
@@ -3240,16 +3751,18 @@ fn main() {
                                 / sound_output.bytes_per_sample as f32)
                                 / sound_output.samples_per_second as f32;
 
-                            println!(
-                                "BTL:{} TC:{} BTW:{}, PC:{} WC:{} DELTA:{} ({}s)",
-                                byte_to_lock,
-                                target_cursor,
-                                bytes_to_write,
-                                play_cursor,
-                                write_cursor,
-                                audio_latency_bytes,
-                                audio_latency_seconds
-                            );
+                            if cfg!(any()) {
+                                println!(
+                                    "BTL:{} TC:{} BTW:{}, PC:{} WC:{} DELTA:{} ({}s)",
+                                    byte_to_lock,
+                                    target_cursor,
+                                    bytes_to_write,
+                                    play_cursor,
+                                    write_cursor,
+                                    audio_latency_bytes,
+                                    audio_latency_seconds
+                                );
+                            }
                         }
                         pw::fill_sound_buffer(&mut sound_output, running_byte_index, sound_buffer);
                     } else {
@@ -3280,7 +3793,8 @@ fn main() {
                     let end_wall_clock = linux::get_wall_clock().unwrap();
 
                     #[cfg(HANDMADE_INTERNAL)]
-                    linux::debug_sync_display(
+                    #[cfg(any())]
+                    linux::_debug_sync_display(
                         &mut global_state.back_buffer,
                         &sound_output,
                         (debug_time_marker_index as i64 - 1) as usize,
@@ -3306,9 +3820,11 @@ fn main() {
                     let ms_per_frame =
                         linux::get_seconds_elapsed(last_wall_clock.clone(), end_wall_clock.clone())
                             * 1e3;
-                    let fps = 1e3 / ms_per_frame;
-                    let mcpf = cycles_elapsed as f64 / 1e6;
-                    println!("{:.02}ms/f, {:.02}f/s, {:.02}mc/f", ms_per_frame, fps, mcpf);
+                    if cfg!(any()) {
+                        let fps = 1e3 / ms_per_frame;
+                        let mcpf = cycles_elapsed as f64 / 1e6;
+                        println!("{:.02}ms/f, {:.02}f/s, {:.02}mc/f", ms_per_frame, fps, mcpf);
+                    }
 
                     last_cycle_count = end_cycle_count;
                     last_wall_clock = end_wall_clock;

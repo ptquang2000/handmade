@@ -1,16 +1,20 @@
 pub mod debug_platform {
-    pub type ReadEntireFile = fn(filename: &str) -> Option<(*mut (), i64)>;
-    pub type WriteEntireFile = fn(filename: &str, memory: *mut (), memory_size: i64) -> bool;
-    pub type FreeFileMemory = fn(memory: *mut (), size: i64);
+    use super::game::Thread;
+
+    pub type ReadEntireFile = fn(thread: &Thread, filename: &str) -> Option<(*mut (), i64)>;
+    pub type WriteEntireFile =
+        fn(thread: &Thread, filename: &str, memory: *mut (), memory_size: i64) -> bool;
+    pub type FreeFileMemory = fn(thread: &Thread, memory: *mut (), size: i64);
 }
 
 pub mod game {
     use super::debug_platform;
 
     pub type UpdateAndRender =
-        extern "C" fn(memory: &mut Memory, inputs: Input, buffer: OffscreenBuffer);
+        extern "C" fn(thread: &Thread, memory: &mut Memory, inputs: Input, buffer: OffscreenBuffer);
     const _: UpdateAndRender = update_and_render;
-    pub type GetSoundSample = extern "C" fn(memory: &mut Memory, sound_buffer: &SoundBuffer);
+    pub type GetSoundSample =
+        extern "C" fn(thread: &Thread, memory: &mut Memory, sound_buffer: &SoundBuffer);
     const _: GetSoundSample = get_sound_samples;
 
     #[repr(C)]
@@ -117,6 +121,11 @@ pub mod game {
     #[repr(C)]
     #[derive(Default, Copy, Clone)]
     pub struct Input {
+        pub mouse_buttons: [ButtonState; 5],
+        pub mouse_x: i32,
+        pub mouse_y: i32,
+        pub mouse_z: i32,
+
         pub controllers: [ControllerInput; 5],
     }
 
@@ -141,27 +150,38 @@ pub mod game {
             unsafe { &mut *(self.permanent_storage_memory as *mut State) }
         }
 
-        fn read_entire_file(&self, filename: &str) -> Option<(*mut (), i64)> {
+        fn read_entire_file(&self, thread: &Thread, filename: &str) -> Option<(*mut (), i64)> {
             if let Some(func) = self.read_entire_file_stub {
-                func(filename)
+                func(thread, filename)
             } else {
                 None
             }
         }
 
-        fn write_entire_file(&self, filename: &str, memory: *mut (), memory_size: i64) -> bool {
+        fn write_entire_file(
+            &self,
+            thread: &Thread,
+            filename: &str,
+            memory: *mut (),
+            memory_size: i64,
+        ) -> bool {
             if let Some(func) = self.write_entire_file_stub {
-                func(filename, memory, memory_size)
+                func(thread, filename, memory, memory_size)
             } else {
                 false
             }
         }
 
-        fn free_file_memory(&self, memory: *mut (), size: i64) {
+        fn free_file_memory(&self, thread: &Thread, memory: *mut (), size: i64) {
             if let Some(func) = self.free_file_memory_stub {
-                func(memory, size)
+                func(thread, memory, size)
             }
         }
+    }
+
+    #[derive(Default)]
+    pub struct Thread {
+        _placeholder: i32,
     }
 
     pub struct State {
@@ -177,6 +197,7 @@ pub mod game {
 
     #[no_mangle]
     extern "C" fn update_and_render(
+        thread: &Thread,
         memory: &mut Memory,
         mut inputs: Input,
         mut buffer: OffscreenBuffer,
@@ -185,9 +206,9 @@ pub mod game {
             let game_state = memory.get_game_state();
 
             let filename = concat!(file!(), "\0");
-            if let Some((contents, contents_size)) = memory.read_entire_file(filename) {
-                memory.write_entire_file("test.out\0", contents, contents_size);
-                memory.free_file_memory(contents, contents_size);
+            if let Some((contents, contents_size)) = memory.read_entire_file(thread, filename) {
+                memory.write_entire_file(thread, "test.out\0", contents, contents_size);
+                memory.free_file_memory(thread, contents, contents_size);
             }
 
             game_state.tone_hz = 512;
@@ -230,10 +251,21 @@ pub mod game {
 
         render_weird_gradient(&mut buffer, game_state.blue_offset, game_state.green_offset);
         render_player(&mut buffer, game_state.player_x, game_state.player_y);
+
+        render_player(&mut buffer, inputs.mouse_x, inputs.mouse_y);
+        for (button_index, &button) in inputs.mouse_buttons.iter().enumerate() {
+            if button.ended_down {
+                render_player(&mut buffer, 10 + 20 * button_index as i32, 10);
+            }
+        }
     }
 
     #[no_mangle]
-    extern "C" fn get_sound_samples(memory: &mut Memory, sound_buffer: &SoundBuffer) {
+    extern "C" fn get_sound_samples(
+        _thread: &Thread,
+        memory: &mut Memory,
+        sound_buffer: &SoundBuffer,
+    ) {
         let game_state = memory.get_game_state();
         output_sound(game_state, sound_buffer, game_state.tone_hz);
     }
