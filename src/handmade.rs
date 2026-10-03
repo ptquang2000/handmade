@@ -130,7 +130,7 @@ pub mod game {
         pub mouse_y: i32,
         pub mouse_z: i32,
 
-        pub seconds_to_advance_over_update: f32,
+        pub dt_for_frame: f32,
 
         pub controllers: [ControllerInput; 5],
     }
@@ -190,7 +190,10 @@ pub mod game {
         _placeholder: i32,
     }
 
-    pub struct State {}
+    pub struct State {
+        play_x: f32,
+        play_y: f32,
+    }
 
     #[no_mangle]
     extern "C" fn update_and_render(
@@ -208,19 +211,87 @@ pub mod game {
             if controller.is_connected {
                 if controller.is_analog {
                 } else {
+                    let mut dplayer_x = 0.;
+                    let mut dplayer_y = 0.;
+
+                    if controller.move_up().ended_down {
+                        dplayer_y -= 1.;
+                    }
+
+                    if controller.move_down().ended_down {
+                        dplayer_y += 1.;
+                    }
+
+                    if controller.move_left().ended_down {
+                        dplayer_x -= 1.;
+                    }
+
+                    if controller.move_right().ended_down {
+                        dplayer_x += 1.;
+                    }
+                    dplayer_x *= 64.;
+                    dplayer_y *= 64.;
+
+                    game_state.play_x += inputs.dt_for_frame * dplayer_x;
+                    game_state.play_y += inputs.dt_for_frame * dplayer_y;
                 }
             }
         }
 
+        let tile_map: [[u32; 17]; 9] = [
+            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1],
+            [1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1],
+            [1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+        ];
+
+        let upper_left_x = -30.;
+        let upper_left_y = 0.;
+        let tile_width = 60.;
+        let tile_height = 60.;
         draw_rectangle(
             buffer,
-            0.,
-            0.,
+            0.0,
+            0.0,
             buffer.width as f32,
             buffer.height as f32,
-            0x00FF00FF,
+            1.0,
+            0.0,
+            0.1,
         );
-        draw_rectangle(buffer, 10., 10., 40., 40., 0x0000FFFF);
+        for (row, columns) in tile_map.iter().enumerate() {
+            for (column, &tile_id) in columns.iter().enumerate() {
+                let gray = if tile_id == 1 { 1.0 } else { 0.5 };
+                let min_x = upper_left_x + column as f32 * tile_width;
+                let min_y = upper_left_y + row as f32 * tile_height;
+                let max_x = min_x + tile_width;
+                let max_y = min_y + tile_width;
+                draw_rectangle(buffer, min_x, min_y, max_x, max_y, gray, gray, gray);
+            }
+        }
+
+        let player_r = 1.0;
+        let player_g = 1.0;
+        let player_b = 0.0;
+        let player_width = 0.75 * tile_width;
+        let player_height = tile_height;
+        let player_left = game_state.play_x - 0.5 * player_width;
+        let player_top = game_state.play_y - player_height;
+        draw_rectangle(
+            buffer,
+            player_left,
+            player_top,
+            player_left + player_width,
+            player_top + player_height,
+            player_r,
+            player_g,
+            player_b,
+        );
     }
 
     #[no_mangle]
@@ -267,12 +338,18 @@ pub mod game {
         real_min_y: f32,
         real_max_x: f32,
         real_max_y: f32,
-        color: u32,
+        r: f32,
+        g: f32,
+        b: f32,
     ) {
         let min_x = (real_min_x.round() as i32).max(0);
         let min_y = (real_min_y.round() as i32).max(0);
         let max_x = (real_max_x.round() as i32).min(buffer.width);
         let max_y = (real_max_y.round() as i32).min(buffer.height);
+
+        let color = ((r * u8::MAX as f32).round() as u32) << 16
+            | ((g * u8::MAX as f32).round() as u32) << 8
+            | ((b * u8::MAX as f32).round() as u32);
 
         for rows in buffer
             .as_slice_mut()

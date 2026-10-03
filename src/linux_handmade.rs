@@ -156,7 +156,7 @@ mod linux {
 
         pub running: bool,
         pub pause: bool,
-        pub buffer_released: bool,
+        pub buffer_released: std::sync::atomic::AtomicBool,
         pub back_buffer: OffscreenBuffer,
 
         pub linux_state: *mut State,
@@ -223,11 +223,12 @@ mod linux {
         );
         wl::shm_pool_destroy(pool);
         wl::buffer_add_listener(global_state.buffer, global_state);
-        xdg::toplevel_set_floating(global_state.toplevel, width, height);
     }
 
     pub fn display_buffer_in_window(global_state: &mut GlobalState, x: i32, y: i32) {
-        global_state.buffer_released = false;
+        global_state
+            .buffer_released
+            .store(false, std::sync::atomic::Ordering::Release);
         wl::surface_damage_buffer(
             global_state.surface,
             x,
@@ -264,19 +265,6 @@ mod linux {
             value as f32 / (i16::MAX as f32)
         } else {
             0.
-        }
-    }
-
-    pub fn process_pending_events(global_state: &mut GlobalState, display: *mut wl::wl_display) {
-        loop {
-            let dispatched_events = wl::dispatch_pending_events(display, 0);
-            if dispatched_events == -1 {
-                global_state.running = false;
-                break;
-            } else if global_state.buffer_released && dispatched_events == 0 {
-                break;
-            } else {
-            }
         }
     }
 
@@ -560,7 +548,10 @@ mod linux {
     pub const MAP_PRIVATE: i32 = 0x2;
     pub const MAP_FAILED: i32 = -1;
 
+    pub const CLOCK_MONOTONIC: i32 = 1;
     pub const CLOCK_MONOTONIC_RAW: i32 = 4;
+
+    pub const TIMER_ABSTIME: i32 = 0x01;
 
     pub const O_RDONLY: i32 = 0o00;
     pub const O_RDWR: i32 = 0o02;
@@ -652,11 +643,23 @@ mod linux {
         }
     }
 
-    pub fn sleep(sleep_ms: i32) {
-        let mut duration = timespec::default();
-        duration.tv_sec = sleep_ms as i64 / 1e3 as i64;
-        duration.tv_nsec = (sleep_ms as i64 - duration.tv_sec * 1e3 as i64) * 1e6 as i64;
-        unsafe { nanosleep(std::ptr::addr_of!(duration), std::ptr::null_mut()) };
+    pub fn sleep(sleep_ns: i64) {
+        let duration = timespec {
+            tv_sec: sleep_ns / 1_000_000_000,
+            tv_nsec: sleep_ns % 1_000_000_000,
+        };
+        debug_assert!(
+            unsafe { nanosleep(std::ptr::addr_of!(duration), std::ptr::null_mut(),) } == 0
+        );
+    }
+
+    pub fn set_timer_slack(slack_ns: i32) -> bool {
+        const PR_SET_TIMERSLACK: i32 = 29;
+        const PR_GET_TIMERSLACK: i32 = 30;
+        unsafe {
+            prctl(PR_SET_TIMERSLACK, slack_ns, 0, 0, 0) > 0
+                && prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0) == slack_ns
+        }
     }
 
     #[link(name = "c")]
@@ -693,6 +696,8 @@ mod linux {
         ) -> std::ffi::c_long;
 
         fn nanosleep(requested_time: *const timespec, remaning: *mut timespec) -> std::ffi::c_int;
+        fn clock_getres(clockid: std::ffi::c_int, res: *mut timespec) -> std::ffi::c_int;
+        pub fn prctl(option: std::ffi::c_int, ...) -> std::ffi::c_int;
     }
 
     #[repr(C)]
@@ -1294,28 +1299,68 @@ mod wl {
         unsafe { wl_display_disconnect(display) }
     }
 
-    pub fn dispatch_pending_events(display: *mut wl_display, timeout: i32) -> i32 {
-        unsafe {
-            while wl_display_prepare_read(display) != 0 {
-                wl_display_dispatch_pending(display);
-            }
-            wl_display_flush(display);
+    pub fn dispatch_pending_events(display: *mut wl_display) -> Result<i32, std::io::Error> {
+        const POLLIN: i16 = 0x001;
+        const POLLOUT: i16 = 0x004;
+        const POLLERR: i16 = 0x008;
+        const POLLHUP: i16 = 0x010;
 
-            const POLLIN: i16 = 0x001;
-            let mut fds = linux::Pollfd {
-                fd: wl_display_get_fd(display),
-                events: POLLIN,
-                revents: 0,
-            };
-            let nfds = 1;
-            if linux::poll(&mut fds, nfds, timeout) == -1 || fds.revents == 0 {
+        loop {
+            unsafe {
+                if wl_display_dispatch_pending(display) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if wl_display_prepare_read(display) != 0 {
+                    continue;
+                }
+
+                let mut events = POLLIN;
+                let fd = wl_display_get_fd(display);
+
+                if wl_display_flush(display) < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() != std::io::ErrorKind::WouldBlock {
+                        wl_display_cancel_read(display);
+                        return Err(err);
+                    }
+
+                    events |= POLLOUT;
+                }
+
+                let mut pfd = linux::Pollfd {
+                    fd,
+                    events,
+                    revents: 0,
+                };
+                loop {
+                    if linux::poll(&mut pfd, 1, -1) >= 0 {
+                        break;
+                    }
+                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    wl_display_cancel_read(display);
+                    return Err(std::io::Error::last_os_error());
+                }
+
+                if pfd.revents & POLLIN != 0 {
+                    if wl_display_read_events(display) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    return Ok(wl_display_dispatch_pending(display));
+                }
+
+                if pfd.revents & POLLOUT != 0 {
+                    wl_display_cancel_read(display);
+                    continue;
+                }
+
                 wl_display_cancel_read(display);
-            } else {
-                debug_assert!(fds.revents == POLLIN, "{}", fds.revents);
-                wl_display_read_events(display);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "Wayland socket poll failed",
+                ));
             }
-
-            wl_display_dispatch_pending(display)
         }
     }
 
@@ -1525,11 +1570,12 @@ mod wl {
         fn wl_display_roundtrip(display: *mut wl_display) -> std::ffi::c_int;
         fn wl_display_connect(name: *const std::ffi::c_char) -> *mut wl_display;
         fn wl_display_disconnect(display: *mut wl_display);
+        fn wl_display_dispatch(display: *mut wl_display) -> std::ffi::c_int;
         fn wl_display_dispatch_pending(display: *mut wl_display) -> std::ffi::c_int;
         fn wl_display_flush(display: *mut wl_display) -> std::ffi::c_int;
         fn wl_display_read_events(display: *mut wl_display) -> std::ffi::c_int;
         fn wl_display_prepare_read(display: *mut wl_display) -> std::ffi::c_int;
-        fn wl_display_cancel_read(display: *mut wl_display) -> std::ffi::c_int;
+        fn wl_display_cancel_read(display: *mut wl_display);
         fn wl_display_get_fd(display: *mut wl_display) -> std::ffi::c_int;
     }
 
@@ -1933,7 +1979,9 @@ mod wl {
 
     pub unsafe extern "C" fn buffer_release(data: *mut std::ffi::c_void, _buffer: *mut wl_buffer) {
         let global_state = &mut *data.cast::<linux::GlobalState>();
-        global_state.buffer_released = true;
+        global_state
+            .buffer_released
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub unsafe extern "C" fn seat_capabilities(
@@ -3297,6 +3345,8 @@ fn cat_strings<'a>(
 }
 
 fn main() {
+    linux::set_timer_slack(1_000);
+
     let mut linux_state = linux::State::default();
     linux::get_exe_filename(&mut linux_state);
 
@@ -3310,7 +3360,9 @@ fn main() {
     libevdev::load_libevdev();
 
     let mut global_state = linux::GlobalState::default();
-    global_state.buffer_released = true;
+    global_state
+        .buffer_released
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     global_state.running = true;
     global_state.back_buffer.bytes_per_pixel = std::mem::size_of::<i32>() as i32;
 
@@ -3336,6 +3388,11 @@ fn main() {
 
         wl::surface_commit(global_state.surface);
         linux::resize_shared_buffer(&mut global_state, 960, 540);
+        xdg::toplevel_set_floating(
+            global_state.toplevel,
+            global_state.back_buffer.width,
+            global_state.back_buffer.height,
+        );
 
         let monitor_refresh_hz = if global_state.refresh_rate > 0 {
             global_state.refresh_rate
@@ -3449,7 +3506,7 @@ fn main() {
                 }
 
                 let [new_input, old_input] = &mut inputs;
-                new_input.seconds_to_advance_over_update = target_seconds_per_frame as f32;
+                new_input.dt_for_frame = target_seconds_per_frame as f32;
                 global_state.game_input = &mut *new_input as *mut _;
 
                 let old_keyboard_controller = &old_input.controllers[0];
@@ -3475,7 +3532,12 @@ fn main() {
                 new_input.mouse_y = old_input.mouse_y;
                 new_input.mouse_z = old_input.mouse_z;
 
-                linux::process_pending_events(&mut global_state, display);
+                while !global_state
+                    .buffer_released
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    wl::dispatch_pending_events(display);
+                }
 
                 if !global_state.pause {
                     for controller_index in 0..max_controller_count {
@@ -3770,12 +3832,19 @@ fn main() {
                         linux::get_seconds_elapsed(last_wall_clock.clone(), end_wall_clock);
                     let mut seconds_elapsed_for_frame = work_seconds_elapsed;
                     if seconds_elapsed_for_frame < target_seconds_per_frame {
+                        let sleep_ns = (target_seconds_per_frame - seconds_elapsed_for_frame) * 1e9;
+                        let sched_delay = 1_000_000;
+                        if sleep_ns > 0. {
+                            linux::sleep((sleep_ns).floor() as i64 - sched_delay);
+                        }
+
+                        let test_seconds_elapsed_for_frame = linux::get_seconds_elapsed(
+                            last_wall_clock.clone(),
+                            linux::get_wall_clock().unwrap(),
+                        );
+                        if test_seconds_elapsed_for_frame < target_seconds_per_frame {}
+
                         while seconds_elapsed_for_frame < target_seconds_per_frame {
-                            let sleep_ms =
-                                (target_seconds_per_frame - seconds_elapsed_for_frame) * 1e3;
-                            if sleep_ms > 0. {
-                                linux::sleep(sleep_ms as i32);
-                            }
                             seconds_elapsed_for_frame = linux::get_seconds_elapsed(
                                 last_wall_clock.clone(),
                                 linux::get_wall_clock().unwrap(),
@@ -3815,7 +3884,7 @@ fn main() {
                     let ms_per_frame =
                         linux::get_seconds_elapsed(last_wall_clock.clone(), end_wall_clock.clone())
                             * 1e3;
-                    if cfg!(any()) {
+                    if cfg!(all()) {
                         let fps = 1e3 / ms_per_frame;
                         let mcpf = cycles_elapsed as f64 / 1e6;
                         println!("{:.02}ms/f, {:.02}f/s, {:.02}mc/f", ms_per_frame, fps, mcpf);
