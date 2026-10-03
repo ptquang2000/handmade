@@ -10,8 +10,12 @@ pub mod debug_platform {
 pub mod game {
     use super::debug_platform;
 
-    pub type UpdateAndRender =
-        extern "C" fn(thread: &Thread, memory: &mut Memory, inputs: Input, buffer: OffscreenBuffer);
+    pub type UpdateAndRender = extern "C" fn(
+        thread: &Thread,
+        memory: &mut Memory,
+        inputs: &mut Input,
+        buffer: &mut OffscreenBuffer,
+    );
     const _: UpdateAndRender = update_and_render;
     pub type GetSoundSample =
         extern "C" fn(thread: &Thread, memory: &mut Memory, sound_buffer: &SoundBuffer);
@@ -126,6 +130,8 @@ pub mod game {
         pub mouse_y: i32,
         pub mouse_z: i32,
 
+        pub seconds_to_advance_over_update: f32,
+
         pub controllers: [ControllerInput; 5],
     }
 
@@ -184,39 +190,16 @@ pub mod game {
         _placeholder: i32,
     }
 
-    pub struct State {
-        tone_hz: i32,
-        green_offset: i32,
-        blue_offset: i32,
-        t_sine: f32,
-
-        player_x: i32,
-        player_y: i32,
-        t_jump: f32,
-    }
+    pub struct State {}
 
     #[no_mangle]
     extern "C" fn update_and_render(
         thread: &Thread,
         memory: &mut Memory,
-        mut inputs: Input,
-        mut buffer: OffscreenBuffer,
+        inputs: &mut Input,
+        buffer: &mut OffscreenBuffer,
     ) {
         if !memory.is_initialized {
-            let game_state = memory.get_game_state();
-
-            let filename = concat!(file!(), "\0");
-            if let Some((contents, contents_size)) = memory.read_entire_file(thread, filename) {
-                memory.write_entire_file(thread, "test.out\0", contents, contents_size);
-                memory.free_file_memory(thread, contents, contents_size);
-            }
-
-            game_state.tone_hz = 512;
-            game_state.t_sine = 0.;
-
-            game_state.player_x = 100;
-            game_state.player_y = 100;
-
             memory.is_initialized = true;
         }
         let game_state = memory.get_game_state();
@@ -224,40 +207,20 @@ pub mod game {
         for controller in &mut inputs.controllers {
             if controller.is_connected {
                 if controller.is_analog {
-                    game_state.blue_offset += (4. * controller.stick_average_x) as i32;
-                    game_state.tone_hz =
-                        512 + (-(i8::MIN as f32) * controller.stick_average_y) as i32;
                 } else {
-                    if controller.move_left().ended_down {
-                        game_state.blue_offset -= 1;
-                    }
-                    if controller.move_right().ended_down {
-                        game_state.blue_offset += 1;
-                    }
                 }
-
-                game_state.player_x += (4. * controller.stick_average_x) as i32;
-                game_state.player_y -= (4. * controller.stick_average_y) as i32;
-                if game_state.t_jump > 0. {
-                    game_state.player_y +=
-                        (10. * (0.5 * std::f32::consts::PI * game_state.t_jump).sin()) as i32;
-                }
-                if controller.action_down().ended_down {
-                    game_state.t_jump = 4.;
-                }
-                game_state.t_jump -= 0.033;
             }
         }
 
-        render_weird_gradient(&mut buffer, game_state.blue_offset, game_state.green_offset);
-        render_player(&mut buffer, game_state.player_x, game_state.player_y);
-
-        render_player(&mut buffer, inputs.mouse_x, inputs.mouse_y);
-        for (button_index, &button) in inputs.mouse_buttons.iter().enumerate() {
-            if button.ended_down {
-                render_player(&mut buffer, 10 + 20 * button_index as i32, 10);
-            }
-        }
+        draw_rectangle(
+            buffer,
+            0.,
+            0.,
+            buffer.width as f32,
+            buffer.height as f32,
+            0x00FF00FF,
+        );
+        draw_rectangle(buffer, 10., 10., 40., 40., 0x0000FFFF);
     }
 
     #[no_mangle]
@@ -267,7 +230,7 @@ pub mod game {
         sound_buffer: &SoundBuffer,
     ) {
         let game_state = memory.get_game_state();
-        output_sound(game_state, sound_buffer, game_state.tone_hz);
+        output_sound(game_state, sound_buffer, 480);
     }
 
     fn output_sound(game_state: &mut State, sound_buffer: &SoundBuffer, tone_hz: i32) {
@@ -278,38 +241,51 @@ pub mod game {
             .samples()
             .chunks_exact_mut(sound_buffer.bytes_per_sample as usize)
         {
-            let sine_value = if cfg!(all()) {
-                game_state.t_sine.sin()
-            } else {
-                0.
+            #[cfg(any())]
+            let sample_value = {
+                let sine_value = game_state.t_sine.sin();
+                ((sine_value * tone_volume) as i16).to_be_bytes()
             };
-            let sample_value = ((sine_value * tone_volume) as i16).to_be_bytes();
+            #[cfg(all())]
+            let sample_value = (0 as i16).to_be_bytes();
+
             for sample_per_channel in sample.chunks_exact_mut(sample_value.len()) {
                 sample_per_channel.copy_from_slice(&sample_value);
             }
 
-            game_state.t_sine += 2. * std::f32::consts::PI * 1. / wave_period;
-            game_state.t_sine = game_state.t_sine.rem_euclid(2. * std::f32::consts::PI);
+            #[cfg(any())]
+            {
+                game_state.t_sine += 2. * std::f32::consts::PI * 1. / wave_period;
+                game_state.t_sine = game_state.t_sine.rem_euclid(2. * std::f32::consts::PI);
+            }
         }
     }
 
-    fn render_player(buffer: &mut OffscreenBuffer, player_x: i32, player_y: i32) {
-        let color = 0xFFFFFFFFu32;
-        let top = player_y;
-        let bottom = player_y + 10;
-        for x in player_x..player_x + 10 {
-            let rows = buffer
-                .as_slice_mut()
-                .chunks_exact_mut(buffer.pitch as usize)
-                .skip(top as usize)
-                .take((bottom - top) as usize);
-            for row in rows {
-                if let Some(pixel) = row
-                    .chunks_exact_mut(buffer.bytes_per_pixel as usize)
-                    .nth(x as usize)
-                {
-                    pixel.copy_from_slice(&color.to_ne_bytes());
-                }
+    fn draw_rectangle(
+        buffer: &mut OffscreenBuffer,
+        real_min_x: f32,
+        real_min_y: f32,
+        real_max_x: f32,
+        real_max_y: f32,
+        color: u32,
+    ) {
+        let min_x = (real_min_x.round() as i32).max(0);
+        let min_y = (real_min_y.round() as i32).max(0);
+        let max_x = (real_max_x.round() as i32).min(buffer.width);
+        let max_y = (real_max_y.round() as i32).min(buffer.height);
+
+        for rows in buffer
+            .as_slice_mut()
+            .chunks_exact_mut(buffer.pitch as usize)
+            .take(max_y as usize)
+            .skip(min_y as usize)
+        {
+            for pixel in rows
+                .chunks_exact_mut(buffer.bytes_per_pixel as usize)
+                .take(max_x as usize)
+                .skip(min_x as usize)
+            {
+                pixel.copy_from_slice(&color.to_ne_bytes());
             }
         }
     }

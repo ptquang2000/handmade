@@ -12,3 +12,6 @@ path = "src/linux_handmade.rs"
 name="libhandmade" 
 path="src/handmade.rs"
 crate-type=["cdylib"]
+
+[lints.rust]
+unused = "allow"

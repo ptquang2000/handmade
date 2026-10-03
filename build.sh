@@ -1,5 +1,5 @@
 ROOT=$(pwd)
-COMPILER_FLAGS='--cfg HANDMADE_INTERNAL -g -C opt-level=0'
+COMPILER_FLAGS='--cfg HANDMADE_INTERNAL -g -C opt-level=0 -A unused'
 LINK_FLAGS='-C link-args=-Wl,-rpath,/usr/lib/spa-0.2 -C link-args=-Wl,-rpath,$ORIGIN -L /usr/lib/spa-0.2 -L .'
 
 XDG_LIB_PATH='/usr/share/wayland-protocols/stable/xdg-shell'

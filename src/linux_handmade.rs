@@ -32,7 +32,7 @@ mod debug_platform {
         debug_assert!(filename.ends_with('\0'));
         unsafe {
             let fd = linux::open(
-                filename.as_ptr() as *const std::ffi::c_void,
+                filename.as_ptr() as *const _,
                 linux::O_RDONLY,
                 linux::S_IRUSR | linux::S_IRGRP | linux::S_IROTH,
             );
@@ -68,7 +68,7 @@ mod debug_platform {
         debug_assert!(filename.ends_with('\0'));
         unsafe {
             let fd = linux::open(
-                filename.as_ptr() as *const std::ffi::c_void,
+                filename.as_ptr() as *const _,
                 linux::O_RDWR | linux::O_CREAT | linux::O_TRUNC,
                 linux::S_IRUSR | linux::S_IWUSR | linux::S_IRGRP | linux::S_IROTH,
             );
@@ -285,7 +285,7 @@ mod linux {
             - last_counter.tv_nsec as f64 / 1e9
     }
 
-    pub fn _debug_sync_display(
+    pub fn debug_sync_display(
         back_buffer: &mut OffscreenBuffer,
         sound_output: &SoundOutput,
         current_marker_index: usize,
@@ -333,7 +333,7 @@ mod linux {
 
                 let first_top = top;
 
-                _debug_draw_sound_buffer_marker(
+                debug_draw_sound_buffer_marker(
                     back_buffer,
                     c,
                     pad_x,
@@ -342,7 +342,7 @@ mod linux {
                     debug_time_marker.output_play_cursor,
                     play_color,
                 );
-                _debug_draw_sound_buffer_marker(
+                debug_draw_sound_buffer_marker(
                     back_buffer,
                     c,
                     pad_x,
@@ -355,7 +355,7 @@ mod linux {
                 top += line_height + pad_y;
                 bottom += line_height + pad_y;
 
-                _debug_draw_sound_buffer_marker(
+                debug_draw_sound_buffer_marker(
                     back_buffer,
                     c,
                     pad_x,
@@ -364,7 +364,7 @@ mod linux {
                     debug_time_marker.output_location,
                     play_color,
                 );
-                _debug_draw_sound_buffer_marker(
+                debug_draw_sound_buffer_marker(
                     back_buffer,
                     c,
                     pad_x,
@@ -377,7 +377,7 @@ mod linux {
                 top += line_height + pad_y;
                 bottom += line_height + pad_y;
 
-                _debug_draw_sound_buffer_marker(
+                debug_draw_sound_buffer_marker(
                     back_buffer,
                     c,
                     pad_x,
@@ -388,7 +388,7 @@ mod linux {
                 );
             }
 
-            _debug_draw_sound_buffer_marker(
+            debug_draw_sound_buffer_marker(
                 back_buffer,
                 c,
                 pad_x,
@@ -397,7 +397,7 @@ mod linux {
                 debug_time_marker.flip_play_cursor,
                 play_color,
             );
-            _debug_draw_sound_buffer_marker(
+            debug_draw_sound_buffer_marker(
                 back_buffer,
                 c,
                 pad_x,
@@ -406,7 +406,7 @@ mod linux {
                 debug_time_marker.flip_play_cursor + 256 * sound_output.bytes_per_sample as u32,
                 play_window_color,
             );
-            _debug_draw_sound_buffer_marker(
+            debug_draw_sound_buffer_marker(
                 back_buffer,
                 c,
                 pad_x,
@@ -418,7 +418,7 @@ mod linux {
         }
     }
 
-    fn _debug_draw_sound_buffer_marker(
+    fn debug_draw_sound_buffer_marker(
         back_buffer: &mut OffscreenBuffer,
         c: f32,
         pad_x: i32,
@@ -429,10 +429,10 @@ mod linux {
     ) {
         let x_f32 = c * value as f32;
         let x = pad_x + x_f32 as i32;
-        _debug_draw_vertical(back_buffer, x, top, bottom, color);
+        debug_draw_vertical(back_buffer, x, top, bottom, color);
     }
 
-    fn _debug_draw_vertical(
+    fn debug_draw_vertical(
         back_buffer: &mut OffscreenBuffer,
         x: i32,
         mut top: i32,
@@ -473,8 +473,8 @@ mod linux {
             &self,
             thread: &handmade::game::Thread,
             memory: &mut handmade::game::Memory,
-            inputs: handmade::game::Input,
-            buffer: handmade::game::OffscreenBuffer,
+            inputs: &mut handmade::game::Input,
+            buffer: &mut handmade::game::OffscreenBuffer,
         ) {
             if let Some(func) = self.update_and_render_stub {
                 func(thread, memory, inputs, buffer)
@@ -685,11 +685,7 @@ mod linux {
 
         fn clock_gettime(clockid: std::ffi::c_int, res: *mut timespec) -> std::ffi::c_int;
 
-        pub fn open(
-            path: *const std::ffi::c_void,
-            flag: std::ffi::c_int,
-            mode: std::ffi::c_long,
-        ) -> std::ffi::c_int;
+        pub fn open(path: *const std::ffi::c_char, flag: std::ffi::c_int, ...) -> std::ffi::c_int;
         pub fn lseek(
             fd: std::ffi::c_int,
             offset: std::ffi::c_long,
@@ -835,7 +831,7 @@ mod linux {
     #[link(name = "c")]
     unsafe extern "C" {
         fn read(fd: std::ffi::c_int, buf: *mut std::ffi::c_void, size: usize) -> isize;
-        fn write(fd: std::ffi::c_int, buf: *mut std::ffi::c_void, size: usize) -> isize;
+        fn write(fd: std::ffi::c_int, buf: *const std::ffi::c_void, size: usize) -> isize;
     }
 
     pub fn begin_recording_input(state: &mut State, input_recording_index: i32) {
@@ -845,7 +841,7 @@ mod linux {
             get_input_file_location(state, true, input_recording_index, &mut filename);
             unsafe {
                 state.recording_fd = open(
-                    filename.0.as_ptr() as *const std::ffi::c_void,
+                    filename.0.as_ptr() as *const _,
                     O_RDWR | O_CREAT | O_TRUNC,
                     S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH,
                 );
@@ -872,7 +868,7 @@ mod linux {
             get_input_file_location(state, true, input_playing_index, &mut filename);
             unsafe {
                 state.play_back_fd = open(
-                    filename.0.as_ptr() as *const std::ffi::c_void,
+                    filename.0.as_ptr() as *const _,
                     O_RDONLY,
                     S_IRUSR | S_IRGRP | S_IROTH,
                 );
@@ -967,7 +963,7 @@ mod linux {
     pub fn create_mapped_file(filename: &str, size: usize) -> Option<MemFd> {
         unsafe {
             let fd = open(
-                filename.as_ptr() as *const std::ffi::c_void,
+                filename.as_ptr() as *const _,
                 O_RDWR | O_CREAT | O_TRUNC,
                 S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH,
             );
@@ -1063,7 +1059,7 @@ mod libevdev {
             if write!(cursor, "/dev/input/event{}\0", event_index).is_ok() {
                 unsafe {
                     let fd = linux::open(
-                        buffer.as_ptr() as *const std::ffi::c_void,
+                        buffer.as_ptr() as *const _,
                         linux::O_RDONLY | linux::O_NONBLOCK,
                         linux::S_IRUSR | linux::S_IRGRP,
                     );
@@ -2928,7 +2924,6 @@ mod pw {
         command: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut spa_command)>,
         trigger_done: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
     }
-    #[allow(dead_code)]
     #[repr(C)]
     enum pw_stream_state {
         Error,
@@ -3128,7 +3123,7 @@ mod pw {
             object: *mut spa_system,
             flags: std::ffi::c_int,
         ) -> std::ffi::c_int;
-        fn _spa_system_eventfd_read(
+        fn spa_system_eventfd_read(
             object: *mut spa_system,
             fd: std::ffi::c_int,
             count: *mut std::ffi::c_ulonglong,
@@ -3340,7 +3335,7 @@ fn main() {
             wp_alpha::get_surface(global_state.alpha, global_state.surface);
 
         wl::surface_commit(global_state.surface);
-        linux::resize_shared_buffer(&mut global_state, 1280, 720);
+        linux::resize_shared_buffer(&mut global_state, 960, 540);
 
         let monitor_refresh_hz = if global_state.refresh_rate > 0 {
             global_state.refresh_rate
@@ -3454,6 +3449,7 @@ fn main() {
                 }
 
                 let [new_input, old_input] = &mut inputs;
+                new_input.seconds_to_advance_over_update = target_seconds_per_frame as f32;
                 global_state.game_input = &mut *new_input as *mut _;
 
                 let old_keyboard_controller = &old_input.controllers[0];
@@ -3657,7 +3653,7 @@ fn main() {
                         linux::play_back_input(&mut linux_state, new_input);
                     }
 
-                    game.update_and_render(&thread, &mut game_memory, new_input.clone(), buffer);
+                    game.update_and_render(&thread, &mut game_memory, new_input, &mut buffer);
 
                     let audio_wall_clock = linux::get_wall_clock().unwrap();
                     let from_begin_to_audio_seconds =
@@ -3723,7 +3719,6 @@ fn main() {
                         } else {
                             target_cursor - byte_to_lock
                         };
-                        debug_assert!(bytes_to_write % sound_output.bytes_per_sample as u32 == 0);
 
                         let mut sound_buffer = handmade::game::SoundBuffer::default();
                         sound_buffer.samples_per_second = sound_output.samples_per_second;
@@ -3794,7 +3789,7 @@ fn main() {
 
                     #[cfg(HANDMADE_INTERNAL)]
                     #[cfg(any())]
-                    linux::_debug_sync_display(
+                    linux::debug_sync_display(
                         &mut global_state.back_buffer,
                         &sound_output,
                         (debug_time_marker_index as i64 - 1) as usize,
