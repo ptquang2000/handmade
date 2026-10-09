@@ -3884,7 +3884,7 @@ fn main() {
                     let ms_per_frame =
                         linux::get_seconds_elapsed(last_wall_clock.clone(), end_wall_clock.clone())
                             * 1e3;
-                    if cfg!(all()) {
+                    if cfg!(any()) {
                         let fps = 1e3 / ms_per_frame;
                         let mcpf = cycles_elapsed as f64 / 1e6;
                         println!("{:.02}ms/f, {:.02}f/s, {:.02}mc/f", ms_per_frame, fps, mcpf);

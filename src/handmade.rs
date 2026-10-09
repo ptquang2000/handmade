@@ -191,8 +191,83 @@ pub mod game {
     }
 
     pub struct State {
-        play_x: f32,
-        play_y: f32,
+        player_x: f32,
+        player_y: f32,
+    }
+
+    #[derive(Default, Clone, Copy)]
+    struct TileMap<'a> {
+        count_x: i32,
+        count_y: i32,
+
+        upper_left_x: f32,
+        upper_left_y: f32,
+        tile_width: f32,
+        tile_height: f32,
+
+        tiles: &'a [u32],
+    }
+
+    fn get_tile_value_unchecked(tile_map: &TileMap, tile_x: i32, tile_y: i32) -> u32 {
+        tile_map.tiles[(tile_y * tile_map.count_x + tile_x) as usize]
+    }
+
+    fn is_tile_map_point_empty(tile_map: &TileMap, test_x: f32, test_y: f32) -> bool {
+        let player_tile_x = ((test_x - tile_map.upper_left_x) / tile_map.tile_width).floor() as i32;
+        let player_tile_y =
+            ((test_y - tile_map.upper_left_y) / tile_map.tile_height).floor() as i32;
+
+        if (player_tile_x >= 0 && player_tile_x < tile_map.count_x as i32)
+            && (player_tile_y >= 0 && player_tile_y < tile_map.count_y as i32)
+        {
+            get_tile_value_unchecked(tile_map, player_tile_x, player_tile_y) == 0
+        } else {
+            false
+        }
+    }
+
+    #[derive(Default)]
+    struct World<'a> {
+        tile_map_count_x: i32,
+        tile_map_count_y: i32,
+
+        tile_maps: &'a [TileMap<'a>],
+    }
+
+    fn get_tile_map<'a>(
+        world: &'a World,
+        tile_map_x: i32,
+        tile_map_y: i32,
+    ) -> Option<&'a TileMap<'a>> {
+        if (tile_map_x >= 0 && tile_map_x < world.tile_map_count_x)
+            && (tile_map_y >= 0 && tile_map_y < world.tile_map_count_y)
+        {
+            Some(&world.tile_maps[(tile_map_y * world.tile_map_count_x + tile_map_x) as usize])
+        } else {
+            None
+        }
+    }
+
+    fn is_world_point_empty(
+        world: &World,
+        tile_map_x: i32,
+        tile_map_y: i32,
+        test_x: f32,
+        test_y: f32,
+    ) -> bool {
+        if let Some(tile_map) = get_tile_map(world, tile_map_x, tile_map_y) {
+            let player_tile_x =
+                ((test_x - tile_map.upper_left_x) / tile_map.tile_width).floor() as i32;
+            let player_tile_y =
+                ((test_y - tile_map.upper_left_y) / tile_map.tile_height).floor() as i32;
+
+            if (player_tile_x >= 0 && player_tile_x < tile_map.count_x as i32)
+                && (player_tile_y >= 0 && player_tile_y < tile_map.count_y as i32)
+            {
+                return get_tile_value_unchecked(tile_map, player_tile_x, player_tile_y) == 0;
+            }
+        }
+        false
     }
 
     #[no_mangle]
@@ -202,9 +277,93 @@ pub mod game {
         inputs: &mut Input,
         buffer: &mut OffscreenBuffer,
     ) {
+        const TILE_MAP_COUNT_X: usize = 17;
+        const TILE_MAP_COUNT_Y: usize = 9;
+        let tiles00: [[u32; TILE_MAP_COUNT_X]; TILE_MAP_COUNT_Y] = [
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1],
+            [1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1],
+            [1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+        ];
+        let tiles01: [[u32; TILE_MAP_COUNT_X]; TILE_MAP_COUNT_Y] = [
+            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        ];
+        let tiles10: [[u32; TILE_MAP_COUNT_X]; TILE_MAP_COUNT_Y] = [
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+        ];
+        let tiles11: [[u32; TILE_MAP_COUNT_X]; TILE_MAP_COUNT_Y] = [
+            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        ];
+
+        let mut tile_maps = [[TileMap::default(); 2]; 2];
+        tile_maps[0][0].count_x = TILE_MAP_COUNT_X as i32;
+        tile_maps[0][0].count_y = TILE_MAP_COUNT_Y as i32;
+
+        tile_maps[0][0].upper_left_x = -30.;
+        tile_maps[0][0].upper_left_y = 0.;
+        tile_maps[0][0].tile_width = 60.;
+        tile_maps[0][0].tile_height = 60.;
+
+        tile_maps[0][0].tiles = tiles00.as_flattened();
+
+        tile_maps[0][1] = tile_maps[0][0];
+        tile_maps[0][1].tiles = tiles01.as_flattened();
+
+        tile_maps[0][1] = tile_maps[0][0];
+        tile_maps[1][0].tiles = tiles10.as_flattened();
+
+        tile_maps[0][1] = tile_maps[0][0];
+        tile_maps[1][1].tiles = tiles11.as_flattened();
+
+        let tile_map = &tile_maps[0][0];
+
+        let mut world = World::default();
+        world.tile_map_count_x = 2;
+        world.tile_map_count_y = 2;
+
+        world.tile_maps = tile_maps.as_flattened();
+
+        let player_width = 0.75 * tile_map.tile_width;
+        let player_height = tile_map.tile_height;
+
         if !memory.is_initialized {
+            let game_state = memory.get_game_state();
+
+            game_state.player_x = 150.;
+            game_state.player_y = 150.;
+
             memory.is_initialized = true;
         }
+
         let game_state = memory.get_game_state();
 
         for controller in &mut inputs.controllers {
@@ -232,28 +391,26 @@ pub mod game {
                     dplayer_x *= 64.;
                     dplayer_y *= 64.;
 
-                    game_state.play_x += inputs.dt_for_frame * dplayer_x;
-                    game_state.play_y += inputs.dt_for_frame * dplayer_y;
+                    let new_player_x = game_state.player_x + inputs.dt_for_frame * dplayer_x;
+                    let new_player_y = game_state.player_y + inputs.dt_for_frame * dplayer_y;
+
+                    if is_tile_map_point_empty(
+                        &tile_map,
+                        new_player_x - 0.5 * player_width,
+                        new_player_y,
+                    ) && is_tile_map_point_empty(
+                        &tile_map,
+                        new_player_x + 0.5 * player_width,
+                        new_player_y,
+                    ) && is_tile_map_point_empty(&tile_map, new_player_x, new_player_y)
+                    {
+                        game_state.player_x = new_player_x;
+                        game_state.player_y = new_player_y;
+                    }
                 }
             }
         }
 
-        let tile_map: [[u32; 17]; 9] = [
-            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
-            [1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1],
-            [1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1],
-            [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1],
-            [0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1],
-            [1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
-            [1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1],
-            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
-        ];
-
-        let upper_left_x = -30.;
-        let upper_left_y = 0.;
-        let tile_width = 60.;
-        let tile_height = 60.;
         draw_rectangle(
             buffer,
             0.0,
@@ -264,13 +421,21 @@ pub mod game {
             0.0,
             0.1,
         );
-        for (row, columns) in tile_map.iter().enumerate() {
-            for (column, &tile_id) in columns.iter().enumerate() {
-                let gray = if tile_id == 1 { 1.0 } else { 0.5 };
-                let min_x = upper_left_x + column as f32 * tile_width;
-                let min_y = upper_left_y + row as f32 * tile_height;
-                let max_x = min_x + tile_width;
-                let max_y = min_y + tile_width;
+        for (row, columns) in tile_map
+            .tiles
+            .chunks_exact(tile_map.count_x as usize)
+            .enumerate()
+        {
+            for (column, _) in columns.iter().enumerate() {
+                let gray = if get_tile_value_unchecked(tile_map, column as i32, row as i32) == 1 {
+                    1.0
+                } else {
+                    0.5
+                };
+                let min_x = tile_map.upper_left_x + column as f32 * tile_map.tile_width;
+                let min_y = tile_map.upper_left_y + row as f32 * tile_map.tile_height;
+                let max_x = min_x + tile_map.tile_width;
+                let max_y = min_y + tile_map.tile_width;
                 draw_rectangle(buffer, min_x, min_y, max_x, max_y, gray, gray, gray);
             }
         }
@@ -278,10 +443,8 @@ pub mod game {
         let player_r = 1.0;
         let player_g = 1.0;
         let player_b = 0.0;
-        let player_width = 0.75 * tile_width;
-        let player_height = tile_height;
-        let player_left = game_state.play_x - 0.5 * player_width;
-        let player_top = game_state.play_y - player_height;
+        let player_left = game_state.player_x - 0.5 * player_width;
+        let player_top = game_state.player_y - player_height;
         draw_rectangle(
             buffer,
             player_left,
