@@ -648,9 +648,7 @@ mod linux {
             tv_sec: sleep_ns / 1_000_000_000,
             tv_nsec: sleep_ns % 1_000_000_000,
         };
-        debug_assert!(
-            unsafe { nanosleep(std::ptr::addr_of!(duration), std::ptr::null_mut(),) } == 0
-        );
+        unsafe { nanosleep(std::ptr::addr_of!(duration), std::ptr::null_mut()) };
     }
 
     pub fn set_timer_slack(slack_ns: i32) -> bool {
