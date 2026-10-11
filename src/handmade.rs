@@ -194,11 +194,7 @@ pub mod game {
     }
 
     pub struct State {
-        player_tile_map_x: i32,
-        player_tile_map_y: i32,
-
-        player_x: f32,
-        player_y: f32,
+        player_p: CanonicalPosition,
     }
 
     #[derive(Default, Clone, Copy)]
@@ -239,6 +235,7 @@ pub mod game {
     struct World<'a> {
         tile_side_in_meters: f32,
         tile_side_in_pixels: i32,
+        meters_to_pixels: f32,
 
         count_x: i32,
         count_y: i32,
@@ -266,13 +263,16 @@ pub mod game {
         }
     }
 
-    fn is_world_point_empty(world: &World, pos: RawPosition) -> bool {
-        let can_pos = get_canonical_position(world, pos);
+    fn is_world_point_empty(world: &World, can_pos: CanonicalPosition) -> bool {
+        let mut empty = false;
+
         let tile_map = get_tile_map(world, can_pos.tile_map_x, can_pos.tile_map_y);
-        is_tile_map_point_empty(world, tile_map, can_pos.tile_x, can_pos.tile_y)
+        empty = is_tile_map_point_empty(world, tile_map, can_pos.tile_x, can_pos.tile_y);
+
+        empty
     }
 
-    #[derive(Default)]
+    #[derive(Default, Clone, Copy)]
     struct CanonicalPosition {
         tile_map_x: i32,
         tile_map_y: i32,
@@ -293,44 +293,48 @@ pub mod game {
         y: f32,
     }
 
-    fn get_canonical_position(world: &World, pos: RawPosition) -> CanonicalPosition {
-        let mut result = CanonicalPosition::default();
+    fn recanonicalize_coord(
+        world: &World,
+        tile_count: i32,
+        tile_map: &mut i32,
+        tile: &mut i32,
+        tile_rel: &mut f32,
+    ) {
+        let offset = floor_f32_to_i32(*tile_rel / world.tile_side_in_meters as f32);
+        *tile += offset;
+        *tile_rel -= offset as f32 * world.tile_side_in_meters;
 
-        result.tile_map_x = pos.tile_map_x;
-        result.tile_map_y = pos.tile_map_y;
+        debug_assert!(*tile_rel >= 0.);
+        debug_assert!(*tile_rel <= world.tile_side_in_meters as f32);
 
-        let x = pos.x - world.upper_left_x;
-        let y = pos.y - world.upper_left_y;
-        result.tile_x = floor_f32_to_i32(x / world.tile_side_in_pixels as f32);
-        result.tile_y = floor_f32_to_i32(y / world.tile_side_in_pixels as f32);
-
-        result.tile_rel_x = x - result.tile_x as f32 * world.tile_side_in_pixels as f32;
-        result.tile_rel_y = y - result.tile_y as f32 * world.tile_side_in_pixels as f32;
-
-        debug_assert!(result.tile_rel_x >= 0.);
-        debug_assert!(result.tile_rel_y >= 0.);
-        debug_assert!(result.tile_rel_x < world.tile_side_in_pixels as f32);
-        debug_assert!(result.tile_rel_y < world.tile_side_in_pixels as f32);
-
-        if result.tile_x < 0 {
-            result.tile_x += world.count_x;
-            result.tile_map_x -= 1;
+        if *tile < 0 {
+            *tile += tile_count;
+            *tile_map -= 1;
         }
 
-        if result.tile_y < 0 {
-            result.tile_y += world.count_y;
-            result.tile_map_y -= 1;
+        if *tile >= tile_count {
+            *tile -= tile_count;
+            *tile_map += 1;
         }
+    }
 
-        if result.tile_x >= world.count_x {
-            result.tile_x -= world.count_x;
-            result.tile_map_x += 1;
-        }
+    fn recanonicalize_position(world: &World, pos: CanonicalPosition) -> CanonicalPosition {
+        let mut result = pos;
 
-        if result.tile_y >= world.count_y {
-            result.tile_y -= world.count_y;
-            result.tile_map_y += 1;
-        }
+        recanonicalize_coord(
+            world,
+            world.count_x,
+            &mut result.tile_map_x,
+            &mut result.tile_x,
+            &mut result.tile_rel_x,
+        );
+        recanonicalize_coord(
+            world,
+            world.count_y,
+            &mut result.tile_map_y,
+            &mut result.tile_y,
+            &mut result.tile_rel_y,
+        );
 
         result
     }
@@ -406,20 +410,25 @@ pub mod game {
 
         world.tile_side_in_meters = 1.4;
         world.tile_side_in_pixels = 60;
+        world.meters_to_pixels = world.tile_side_in_pixels as f32 / world.tile_side_in_meters;
 
         world.upper_left_x = -world.tile_side_in_pixels as f32 / 2.;
         world.upper_left_y = 0.;
 
-        let player_width = 0.75 * world.tile_side_in_pixels as f32;
-        let player_height = world.tile_side_in_pixels;
+        let player_height = 1.4;
+        let player_width = 0.75 * player_height;
 
         world.tile_maps = tile_maps.as_flattened();
 
         if !memory.is_initialized {
             let game_state = memory.get_game_state();
 
-            game_state.player_x = 175.;
-            game_state.player_y = 150.;
+            game_state.player_p.tile_map_x = 0;
+            game_state.player_p.tile_map_y = 0;
+            game_state.player_p.tile_x = 3;
+            game_state.player_p.tile_y = 3;
+            game_state.player_p.tile_rel_x = 5.;
+            game_state.player_p.tile_rel_y = 5.;
 
             memory.is_initialized = true;
         }
@@ -427,8 +436,8 @@ pub mod game {
         let game_state = memory.get_game_state();
         let tile_map = get_tile_map(
             &world,
-            game_state.player_tile_map_x,
-            game_state.player_tile_map_y,
+            game_state.player_p.tile_map_x,
+            game_state.player_p.tile_map_y,
         )
         .unwrap();
 
@@ -440,51 +449,41 @@ pub mod game {
                     let mut dplayer_y = 0.;
 
                     if controller.move_up().ended_down {
-                        dplayer_y -= 1.;
+                        dplayer_y = -1.;
                     }
 
                     if controller.move_down().ended_down {
-                        dplayer_y += 1.;
+                        dplayer_y = 1.;
                     }
 
                     if controller.move_left().ended_down {
-                        dplayer_x -= 1.;
+                        dplayer_x = -1.;
                     }
 
                     if controller.move_right().ended_down {
-                        dplayer_x += 1.;
+                        dplayer_x = 1.;
                     }
-                    dplayer_x *= 64.;
-                    dplayer_y *= 64.;
+                    dplayer_x *= 2.;
+                    dplayer_y *= 2.;
 
-                    let new_player_x = game_state.player_x + inputs.dt_for_frame * dplayer_x;
-                    let new_player_y = game_state.player_y + inputs.dt_for_frame * dplayer_y;
+                    let mut new_player_p = game_state.player_p;
+                    new_player_p.tile_rel_x += inputs.dt_for_frame * dplayer_x;
+                    new_player_p.tile_rel_y += inputs.dt_for_frame * dplayer_y;
+                    new_player_p = recanonicalize_position(&world, new_player_p);
 
-                    let player_pos = RawPosition {
-                        tile_map_x: game_state.player_tile_map_x,
-                        tile_map_y: game_state.player_tile_map_y,
-                        x: new_player_x,
-                        y: new_player_y,
-                    };
-                    let mut player_left = player_pos;
-                    player_left.x -= 0.5 * player_width;
-                    let mut player_right = player_pos;
-                    player_right.x += 0.5 * player_width;
+                    let mut player_left = new_player_p;
+                    player_left.tile_rel_x -= 0.5 * player_width;
+                    player_left = recanonicalize_position(&world, player_left);
 
-                    if is_world_point_empty(&world, player_left)
+                    let mut player_right = new_player_p;
+                    player_right.tile_rel_x += 0.5 * player_width;
+                    player_right = recanonicalize_position(&world, player_right);
+
+                    if is_world_point_empty(&world, new_player_p)
+                        && is_world_point_empty(&world, player_left)
                         && is_world_point_empty(&world, player_right)
-                        && is_world_point_empty(&world, player_pos)
                     {
-                        let can_pos = get_canonical_position(&world, player_pos);
-
-                        game_state.player_tile_map_x = can_pos.tile_map_x;
-                        game_state.player_tile_map_y = can_pos.tile_map_y;
-                        game_state.player_x = world.upper_left_x
-                            + world.tile_side_in_pixels as f32 * can_pos.tile_x as f32
-                            + can_pos.tile_rel_x;
-                        game_state.player_y = world.upper_left_y
-                            + world.tile_side_in_pixels as f32 * can_pos.tile_y as f32
-                            + can_pos.tile_rel_y;
+                        game_state.player_p = new_player_p;
                     }
                 }
             }
@@ -506,12 +505,17 @@ pub mod game {
             .enumerate()
         {
             for (column, _) in columns.iter().enumerate() {
-                let gray =
+                let mut gray =
                     if get_tile_value_unchecked(&world, tile_map, column as i32, row as i32) == 1 {
                         1.0
                     } else {
                         0.5
                     };
+                if column as i32 == game_state.player_p.tile_x
+                    && row as i32 == game_state.player_p.tile_y
+                {
+                    gray = 0.
+                };
                 let min_x = world.upper_left_x + column as f32 * world.tile_side_in_pixels as f32;
                 let min_y = world.upper_left_y + row as f32 * world.tile_side_in_pixels as f32;
                 let max_x = min_x + world.tile_side_in_pixels as f32;
@@ -523,14 +527,20 @@ pub mod game {
         let player_r = 1.0;
         let player_g = 1.0;
         let player_b = 0.0;
-        let player_left = game_state.player_x - 0.5 * player_width;
-        let player_top = game_state.player_y - player_height as f32;
+        let player_left = world.upper_left_x
+            + (world.tile_side_in_pixels * game_state.player_p.tile_x) as f32
+            + world.meters_to_pixels * game_state.player_p.tile_rel_x
+            - 0.5 * world.meters_to_pixels * player_width;
+        let player_top = world.upper_left_y
+            + (world.tile_side_in_pixels * game_state.player_p.tile_y) as f32
+            + world.meters_to_pixels * game_state.player_p.tile_rel_y
+            - world.meters_to_pixels * player_height;
         draw_rectangle(
             buffer,
             player_left,
             player_top,
-            player_left + player_width,
-            player_top + player_height as f32,
+            player_left + world.meters_to_pixels * player_width,
+            player_top + world.meters_to_pixels * player_height,
             player_r,
             player_g,
             player_b,
