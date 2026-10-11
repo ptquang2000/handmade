@@ -1,3 +1,5 @@
+include!("handmade_intrinsics.rs");
+
 pub mod debug_platform {
     use super::game::Thread;
 
@@ -9,6 +11,7 @@ pub mod debug_platform {
 
 pub mod game {
     use super::debug_platform;
+    use super::intrinsics::*;
 
     pub type UpdateAndRender = extern "C" fn(
         thread: &Thread,
@@ -234,13 +237,14 @@ pub mod game {
 
     #[derive(Default)]
     struct World<'a> {
+        tile_side_in_meters: f32,
+        tile_side_in_pixels: i32,
+
         count_x: i32,
         count_y: i32,
 
         upper_left_x: f32,
         upper_left_y: f32,
-        tile_width: f32,
-        tile_height: f32,
 
         tile_map_count_x: i32,
         tile_map_count_y: i32,
@@ -297,16 +301,16 @@ pub mod game {
 
         let x = pos.x - world.upper_left_x;
         let y = pos.y - world.upper_left_y;
-        result.tile_x = (x / world.tile_width).floor() as i32;
-        result.tile_y = (y / world.tile_height).floor() as i32;
+        result.tile_x = floor_f32_to_i32(x / world.tile_side_in_pixels as f32);
+        result.tile_y = floor_f32_to_i32(y / world.tile_side_in_pixels as f32);
 
-        result.tile_rel_x = x - result.tile_x as f32 * world.tile_width;
-        result.tile_rel_y = y - result.tile_y as f32 * world.tile_height;
+        result.tile_rel_x = x - result.tile_x as f32 * world.tile_side_in_pixels as f32;
+        result.tile_rel_y = y - result.tile_y as f32 * world.tile_side_in_pixels as f32;
 
         debug_assert!(result.tile_rel_x >= 0.);
         debug_assert!(result.tile_rel_y >= 0.);
-        debug_assert!(result.tile_rel_x < world.tile_width);
-        debug_assert!(result.tile_rel_y < world.tile_height);
+        debug_assert!(result.tile_rel_x < world.tile_side_in_pixels as f32);
+        debug_assert!(result.tile_rel_y < world.tile_side_in_pixels as f32);
 
         if result.tile_x < 0 {
             result.tile_x += world.count_x;
@@ -399,20 +403,22 @@ pub mod game {
         world.tile_map_count_y = 2;
         world.count_x = TILE_MAP_COUNT_X as i32;
         world.count_y = TILE_MAP_COUNT_Y as i32;
-        world.upper_left_x = -30.;
-        world.upper_left_y = 0.;
-        world.tile_width = 60.;
-        world.tile_height = 60.;
 
-        let player_width = 0.75 * world.tile_width;
-        let player_height = world.tile_height;
+        world.tile_side_in_meters = 1.4;
+        world.tile_side_in_pixels = 60;
+
+        world.upper_left_x = -world.tile_side_in_pixels as f32 / 2.;
+        world.upper_left_y = 0.;
+
+        let player_width = 0.75 * world.tile_side_in_pixels as f32;
+        let player_height = world.tile_side_in_pixels;
 
         world.tile_maps = tile_maps.as_flattened();
 
         if !memory.is_initialized {
             let game_state = memory.get_game_state();
 
-            game_state.player_x = 150.;
+            game_state.player_x = 175.;
             game_state.player_y = 150.;
 
             memory.is_initialized = true;
@@ -474,10 +480,10 @@ pub mod game {
                         game_state.player_tile_map_x = can_pos.tile_map_x;
                         game_state.player_tile_map_y = can_pos.tile_map_y;
                         game_state.player_x = world.upper_left_x
-                            + world.tile_width * can_pos.tile_x as f32
+                            + world.tile_side_in_pixels as f32 * can_pos.tile_x as f32
                             + can_pos.tile_rel_x;
                         game_state.player_y = world.upper_left_y
-                            + world.tile_height * can_pos.tile_y as f32
+                            + world.tile_side_in_pixels as f32 * can_pos.tile_y as f32
                             + can_pos.tile_rel_y;
                     }
                 }
@@ -506,10 +512,10 @@ pub mod game {
                     } else {
                         0.5
                     };
-                let min_x = world.upper_left_x + column as f32 * world.tile_width;
-                let min_y = world.upper_left_y + row as f32 * world.tile_height;
-                let max_x = min_x + world.tile_width;
-                let max_y = min_y + world.tile_width;
+                let min_x = world.upper_left_x + column as f32 * world.tile_side_in_pixels as f32;
+                let min_y = world.upper_left_y + row as f32 * world.tile_side_in_pixels as f32;
+                let max_x = min_x + world.tile_side_in_pixels as f32;
+                let max_y = min_y + world.tile_side_in_pixels as f32;
                 draw_rectangle(buffer, min_x, min_y, max_x, max_y, gray, gray, gray);
             }
         }
@@ -518,13 +524,13 @@ pub mod game {
         let player_g = 1.0;
         let player_b = 0.0;
         let player_left = game_state.player_x - 0.5 * player_width;
-        let player_top = game_state.player_y - player_height;
+        let player_top = game_state.player_y - player_height as f32;
         draw_rectangle(
             buffer,
             player_left,
             player_top,
             player_left + player_width,
-            player_top + player_height,
+            player_top + player_height as f32,
             player_r,
             player_g,
             player_b,
@@ -579,14 +585,14 @@ pub mod game {
         g: f32,
         b: f32,
     ) {
-        let max_x = (real_max_x.round() as i32).min(buffer.width);
-        let max_y = (real_max_y.round() as i32).min(buffer.height);
-        let min_x = (real_min_x.round() as i32).max(0).min(max_x);
-        let min_y = (real_min_y.round() as i32).max(0).min(max_y);
+        let max_x = round_f32_to_i32(real_max_x).min(buffer.width);
+        let max_y = round_f32_to_i32(real_max_y).min(buffer.height);
+        let min_x = round_f32_to_i32(real_min_x).max(0).min(max_x);
+        let min_y = round_f32_to_i32(real_min_y).max(0).min(max_y);
 
-        let color = ((r * u8::MAX as f32).round() as u32) << 16
-            | ((g * u8::MAX as f32).round() as u32) << 8
-            | ((b * u8::MAX as f32).round() as u32);
+        let color = round_f32_to_u32(r * u8::MAX as f32) << 16
+            | round_f32_to_u32(g * u8::MAX as f32) << 8
+            | round_f32_to_u32(b * u8::MAX as f32);
 
         for rows in buffer
             .as_slice_mut()
