@@ -1,11 +1,11 @@
 pub mod intrinsics {
     pub fn round_f32_to_i32(float32: f32) -> i32 {
-        let result = (float32 + 0.5) as i32;
+        let result = float32.round() as i32;
         result
     }
 
     pub fn round_f32_to_u32(float32: f32) -> u32 {
-        let result = (float32 + 0.5) as u32;
+        let result = float32.round() as u32;
         result
     }
 
