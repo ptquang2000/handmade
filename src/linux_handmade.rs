@@ -1,32 +1,13 @@
+#[macro_use]
+#[path = "handmade.rs"]
 mod handmade;
-
-macro_rules! kilobytes {
-    ($value:expr) => {
-        $value * 1024
-    };
-}
-macro_rules! megabytes {
-    ($value:expr) => {
-        kilobytes!($value) * 1024
-    };
-}
-macro_rules! gigabytes {
-    ($value:expr) => {
-        megabytes!($value) * 1024
-    };
-}
-macro_rules! terabytes {
-    ($value:expr) => {
-        gigabytes!($value) * 1024
-    };
-}
 
 #[cfg(HANDMADE_INTERNAL)]
 mod debug_platform {
     use crate::{handmade, linux};
 
     pub fn read_entire_file(
-        _thread: &handmade::game::Thread,
+        _thread: &handmade::ThreadContext,
         filename: &str,
     ) -> Option<(*mut (), i64)> {
         debug_assert!(filename.ends_with('\0'));
@@ -60,7 +41,7 @@ mod debug_platform {
     }
 
     pub fn write_entire_file(
-        _thread: &handmade::game::Thread,
+        _thread: &handmade::ThreadContext,
         filename: &str,
         memory: *mut (),
         memory_size: i64,
@@ -100,7 +81,7 @@ mod debug_platform {
         false
     }
 
-    pub fn free_file_memory(_thread: &handmade::game::Thread, memory: *mut (), size: i64) {
+    pub fn free_file_memory(_thread: &handmade::ThreadContext, memory: *mut (), size: i64) {
         unsafe { linux::munmap(memory as *mut std::ffi::c_void, size as usize) };
     }
 }
@@ -152,7 +133,7 @@ mod linux {
         pub alpha: *mut wp_alpha::wp_alpha_modifier_v1,
         pub alpha_surface: *mut wp_alpha::wp_alpha_modifier_surface_v1,
 
-        pub game_input: *mut handmade::game::Input,
+        pub game_input: *mut handmade::GameInput,
 
         pub running: bool,
         pub pause: bool,
@@ -240,7 +221,7 @@ mod linux {
         wl::surface_commit(global_state.surface);
     }
 
-    pub fn process_keyboard_message(new_state: &mut handmade::game::ButtonState, is_down: bool) {
+    pub fn process_keyboard_message(new_state: &mut handmade::GameButtonState, is_down: bool) {
         if new_state.ended_down != is_down {
             new_state.ended_down = is_down;
             new_state.half_transition_count += 1;
@@ -248,9 +229,9 @@ mod linux {
     }
 
     pub fn process_input_digital_button(
-        old_state: &handmade::game::ButtonState,
+        old_state: &handmade::GameButtonState,
         value: i32,
-        new_state: &mut handmade::game::ButtonState,
+        new_state: &mut handmade::GameButtonState,
     ) {
         new_state.ended_down = value == 1;
         new_state.half_transition_count = (old_state.ended_down != new_state.ended_down) as i32;
@@ -452,17 +433,17 @@ mod linux {
     pub struct GameCode {
         handle: Option<*mut ()>,
         pub last_write_time: i64,
-        update_and_render_stub: Option<handmade::game::UpdateAndRender>,
-        get_sound_samples_stub: Option<handmade::game::GetSoundSample>,
+        update_and_render_stub: Option<handmade::GameUpdateAndRender>,
+        get_sound_samples_stub: Option<handmade::GameGetSoundSample>,
     }
 
     impl GameCode {
         pub fn update_and_render(
             &self,
-            thread: &handmade::game::Thread,
-            memory: &mut handmade::game::Memory,
-            inputs: &mut handmade::game::Input,
-            buffer: &mut handmade::game::OffscreenBuffer,
+            thread: &handmade::ThreadContext,
+            memory: &mut handmade::GameMemory,
+            inputs: &mut handmade::GameInput,
+            buffer: &mut handmade::GameOffscreenBuffer,
         ) {
             if let Some(func) = self.update_and_render_stub {
                 func(thread, memory, inputs, buffer)
@@ -472,9 +453,9 @@ mod linux {
 
         pub fn get_sound_samples(
             &self,
-            thread: &handmade::game::Thread,
-            memory: &mut handmade::game::Memory,
-            sound_buffer: &handmade::game::SoundBuffer,
+            thread: &handmade::ThreadContext,
+            memory: &mut handmade::GameMemory,
+            sound_buffer: &handmade::GameSoundBuffer,
         ) {
             if let Some(func) = self.get_sound_samples_stub {
                 func(thread, memory, sound_buffer)
@@ -515,12 +496,12 @@ mod linux {
                 game_code.update_and_render_stub =
                     std::mem::transmute::<*mut std::ffi::c_void, _>(dlsym(
                         game_code_library,
-                        "update_and_render\0".as_ptr() as *const i8,
+                        "game_update_and_render\0".as_ptr() as *const i8,
                     ));
                 game_code.get_sound_samples_stub =
                     std::mem::transmute::<*mut std::ffi::c_void, _>(dlsym(
                         game_code_library,
-                        "get_sound_samples\0".as_ptr() as *const i8,
+                        "game_get_sound_samples\0".as_ptr() as *const i8,
                     ));
                 Some(game_code_library as *mut ())
             } else {
@@ -891,7 +872,7 @@ mod linux {
         state.input_playing_index = 0;
     }
 
-    pub fn record_input(state: &mut State, mut new_input: handmade::game::Input) {
+    pub fn record_input(state: &mut State, mut new_input: handmade::GameInput) {
         unsafe {
             write(
                 state.recording_fd,
@@ -901,11 +882,11 @@ mod linux {
         }
     }
 
-    pub fn play_back_input(state: &mut State, new_input: &mut handmade::game::Input) {
+    pub fn play_back_input(state: &mut State, new_input: &mut handmade::GameInput) {
         unsafe {
             let bytes_read = read(
                 state.play_back_fd,
-                new_input as *mut handmade::game::Input as *mut _,
+                new_input as *mut handmade::GameInput as *mut _,
                 std::mem::size_of_val(new_input),
             );
             if bytes_read == 0 {
@@ -914,7 +895,7 @@ mod linux {
                 begin_input_play_back(state, play_index);
                 read(
                     state.play_back_fd,
-                    new_input as *mut handmade::game::Input as *mut _,
+                    new_input as *mut handmade::GameInput as *mut _,
                     std::mem::size_of_val(new_input),
                 );
             }
@@ -2894,7 +2875,7 @@ mod pw {
     pub fn fill_sound_buffer(
         sound_output: &mut linux::SoundOutput,
         write_index: u32,
-        sound_buffer: handmade::game::SoundBuffer,
+        sound_buffer: handmade::GameSoundBuffer,
     ) {
         let secondary_buffer = sound_output.secondary_buffer.as_slice_mut();
         let secondary_buffer_size = secondary_buffer.len();
@@ -3438,7 +3419,7 @@ fn main() {
             0
         };
 
-        let mut game_memory = handmade::game::Memory::default();
+        let mut game_memory = handmade::GameMemory::default();
         game_memory.transient_storage_size = megabytes!(64);
         game_memory.permanent_storage_size = gigabytes!(1);
         game_memory.read_entire_file_stub = Some(debug_platform::read_entire_file);
@@ -3477,7 +3458,7 @@ fn main() {
             }
             linux_state.replay_buffers = replay_buffers;
 
-            let mut inputs = [handmade::game::Input::default(); 2];
+            let mut inputs = [handmade::GameInput::default(); 2];
             let controllers = libevdev::get_controllers();
             let max_controller_count = controllers.iter().take_while(|dev| !dev.is_null()).count();
             let max_controller_count = max_controller_count.min(inputs[0].controllers.len() - 1);
@@ -3509,7 +3490,7 @@ fn main() {
 
                 let old_keyboard_controller = &old_input.controllers[0];
                 let new_keyboard_controller = &mut new_input.controllers[0];
-                *new_keyboard_controller = handmade::game::ControllerInput::default();
+                *new_keyboard_controller = handmade::GameControllerInput::default();
                 for (new_button, old_button) in new_keyboard_controller
                     .buttons
                     .iter_mut()
@@ -3697,9 +3678,9 @@ fn main() {
                         }
                     }
 
-                    let thread = handmade::game::Thread::default();
+                    let thread = handmade::ThreadContext::default();
 
-                    let mut buffer = handmade::game::OffscreenBuffer::default();
+                    let mut buffer = handmade::GameOffscreenBuffer::default();
                     buffer.memory = global_state.back_buffer.memory.addr;
                     buffer.width = global_state.back_buffer.width;
                     buffer.height = global_state.back_buffer.height;
@@ -3780,7 +3761,7 @@ fn main() {
                             target_cursor - byte_to_lock
                         };
 
-                        let mut sound_buffer = handmade::game::SoundBuffer::default();
+                        let mut sound_buffer = handmade::GameSoundBuffer::default();
                         sound_buffer.samples_per_second = sound_output.samples_per_second;
                         sound_buffer.sample_count =
                             bytes_to_write as i32 / sound_output.bytes_per_sample;
