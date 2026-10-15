@@ -74,6 +74,75 @@ pub struct GameState {
     world: *mut World,
 
     player_p: TileMapPosition,
+    pixel_pointer: *mut (),
+}
+
+fn draw_rectangle(
+    buffer: &mut GameOffscreenBuffer,
+    real_min_x: f32,
+    real_min_y: f32,
+    real_max_x: f32,
+    real_max_y: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+) {
+    let max_x = round_f32_to_i32(real_max_x).min(buffer.width);
+    let max_y = round_f32_to_i32(real_max_y).min(buffer.height);
+    let min_x = round_f32_to_i32(real_min_x).max(0).min(max_x);
+    let min_y = round_f32_to_i32(real_min_y).max(0).min(max_y);
+
+    let color = round_f32_to_u32(r * u8::MAX as f32) << 16
+        | round_f32_to_u32(g * u8::MAX as f32) << 8
+        | round_f32_to_u32(b * u8::MAX as f32);
+
+    for rows in buffer
+        .as_slice_mut()
+        .chunks_exact_mut(buffer.pitch as usize)
+        .take(max_y as usize)
+        .skip(min_y as usize)
+    {
+        for pixel in rows
+            .chunks_exact_mut(buffer.bytes_per_pixel as usize)
+            .take(max_x as usize)
+            .skip(min_x as usize)
+        {
+            pixel.copy_from_slice(&color.to_ne_bytes());
+        }
+    }
+}
+
+#[repr(C, packed(1))]
+#[derive(Debug)]
+struct BitmapHeader {
+    filetype: u16,
+    filesize: u32,
+    reserved1: u16,
+    reserved2: u16,
+    bitmap_offset: u32,
+    size: u32,
+    width: i32,
+    height: i32,
+    planes: u16,
+    bits_per_pixel: u16,
+}
+
+pub fn debug_load_bmp(
+    thread: &ThreadContext,
+    read_entire_file: DebugPlatformReadEntireFile,
+    file_name: &str,
+) -> *mut () {
+    let mut result = std::ptr::null_mut();
+
+    if let Some((content, size)) = read_entire_file(thread, file_name) {
+        if size != 0 {
+            let header = unsafe { content.cast::<BitmapHeader>().as_ref_unchecked() };
+            let pixels = content.wrapping_byte_add(header.bitmap_offset as usize);
+            result = pixels;
+        }
+    }
+
+    result
 }
 
 #[no_mangle]
@@ -89,10 +158,16 @@ extern "C" fn game_update_and_render(
     if !memory.is_initialized {
         let game_state = memory.get_game_state();
 
+        game_state.pixel_pointer = debug_load_bmp(
+            thread,
+            memory.read_entire_file_stub.unwrap(),
+            "test/test_background.bmp\0",
+        );
+
         game_state.player_p.abs_tile_x = 1;
         game_state.player_p.abs_tile_y = 3;
-        game_state.player_p.tile_rel_x = 5.;
-        game_state.player_p.tile_rel_y = 5.;
+        game_state.player_p.offset_x = 5.;
+        game_state.player_p.offset_y = 5.;
 
         initialize_arena(
             &mut game_state.world_arena,
@@ -144,7 +219,9 @@ extern "C" fn game_update_and_render(
             };
             random_number_index += 1;
 
+            let mut created_z_door = false;
             if random_choice == 2 {
+                created_z_door = true;
                 if abs_tile_z == 0 {
                     door_up = true;
                 } else {
@@ -186,6 +263,7 @@ extern "C" fn game_update_and_render(
                         if door_up {
                             tile_value = 3;
                         }
+
                         if door_down {
                             tile_value = 4;
                         }
@@ -196,7 +274,7 @@ extern "C" fn game_update_and_render(
                         tile_map,
                         abs_tile_x,
                         abs_tile_y,
-                        0,
+                        abs_tile_z,
                         tile_value,
                     );
                 }
@@ -205,12 +283,9 @@ extern "C" fn game_update_and_render(
             door_left = door_right;
             door_bottom = door_top;
 
-            if door_up {
-                door_down = true;
-                door_up = false;
-            } else if door_down {
-                door_up = true;
-                door_down = false;
+            if created_z_door {
+                door_down = !door_down;
+                door_up = !door_up;
             } else {
                 door_up = false;
                 door_down = false;
@@ -272,22 +347,32 @@ extern "C" fn game_update_and_render(
                 dplayer_y *= player_speed;
 
                 let mut new_player_p = game_state.player_p;
-                new_player_p.tile_rel_x += inputs.dt_for_frame * dplayer_x;
-                new_player_p.tile_rel_y += inputs.dt_for_frame * dplayer_y;
+                new_player_p.offset_x += inputs.dt_for_frame * dplayer_x;
+                new_player_p.offset_y += inputs.dt_for_frame * dplayer_y;
                 new_player_p = recanonicalize_position(tile_map, new_player_p);
 
                 let mut player_left = new_player_p;
-                player_left.tile_rel_x -= 0.5 * player_width;
+                player_left.offset_x -= 0.5 * player_width;
                 player_left = recanonicalize_position(tile_map, player_left);
 
                 let mut player_right = new_player_p;
-                player_right.tile_rel_x += 0.5 * player_width;
+                player_right.offset_x += 0.5 * player_width;
                 player_right = recanonicalize_position(tile_map, player_right);
 
                 if is_tile_map_point_empty(tile_map, new_player_p)
                     && is_tile_map_point_empty(tile_map, player_left)
                     && is_tile_map_point_empty(tile_map, player_right)
                 {
+                    if !are_on_same_tile(&game_state.player_p, &new_player_p) {
+                        let new_tile_value = new_player_p.get_tile_value(tile_map);
+
+                        if new_tile_value == 3 {
+                            new_player_p.abs_tile_z += 1;
+                        } else if new_tile_value == 4 {
+                            new_player_p.abs_tile_z -= 1;
+                        }
+                    }
+
                     game_state.player_p = new_player_p;
                 }
             }
@@ -334,9 +419,9 @@ extern "C" fn game_update_and_render(
                     gray = 0.
                 };
 
-                let cen_x = screen_center_x - meters_to_pixels * game_state.player_p.tile_rel_x
+                let cen_x = screen_center_x - meters_to_pixels * game_state.player_p.offset_x
                     + rel_column as f32 * tile_side_in_pixels as f32;
-                let cen_y = screen_center_y + meters_to_pixels * game_state.player_p.tile_rel_y
+                let cen_y = screen_center_y + meters_to_pixels * game_state.player_p.offset_y
                     - rel_row as f32 * tile_side_in_pixels as f32;
                 let min_x = cen_x - 0.5 * tile_side_in_pixels as f32;
                 let min_y = cen_y - 0.5 * tile_side_in_pixels as f32;
@@ -362,6 +447,19 @@ extern "C" fn game_update_and_render(
         player_g,
         player_b,
     );
+
+    #[cfg(any())]
+    {
+        let source = unsafe {
+            std::slice::from_raw_parts(
+                game_state.pixel_pointer as *const u8,
+                (buffer.width * buffer.pitch) as usize,
+            )
+        };
+        for (dest, source) in buffer.as_slice_mut().iter_mut().zip(source) {
+            *dest = *source;
+        }
+    }
 }
 
 #[no_mangle]
@@ -398,41 +496,6 @@ fn game_output_sound(game_state: &mut GameState, sound_buffer: &GameSoundBuffer,
         {
             game_state.t_sine += 2. * std::f32::consts::PI * 1. / wave_period;
             game_state.t_sine = game_state.t_sine.rem_euclid(2. * std::f32::consts::PI);
-        }
-    }
-}
-
-fn draw_rectangle(
-    buffer: &mut GameOffscreenBuffer,
-    real_min_x: f32,
-    real_min_y: f32,
-    real_max_x: f32,
-    real_max_y: f32,
-    r: f32,
-    g: f32,
-    b: f32,
-) {
-    let max_x = round_f32_to_i32(real_max_x).min(buffer.width);
-    let max_y = round_f32_to_i32(real_max_y).min(buffer.height);
-    let min_x = round_f32_to_i32(real_min_x).max(0).min(max_x);
-    let min_y = round_f32_to_i32(real_min_y).max(0).min(max_y);
-
-    let color = round_f32_to_u32(r * u8::MAX as f32) << 16
-        | round_f32_to_u32(g * u8::MAX as f32) << 8
-        | round_f32_to_u32(b * u8::MAX as f32);
-
-    for rows in buffer
-        .as_slice_mut()
-        .chunks_exact_mut(buffer.pitch as usize)
-        .take(max_y as usize)
-        .skip(min_y as usize)
-    {
-        for pixel in rows
-            .chunks_exact_mut(buffer.bytes_per_pixel as usize)
-            .take(max_x as usize)
-            .skip(min_x as usize)
-        {
-            pixel.copy_from_slice(&color.to_ne_bytes());
         }
     }
 }
