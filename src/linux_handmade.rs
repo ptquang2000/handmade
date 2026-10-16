@@ -1,5 +1,5 @@
 #[macro_use]
-#[path = "handmade.rs"]
+#[path = "handmade_platform.rs"]
 mod handmade;
 
 #[cfg(HANDMADE_INTERNAL)]
@@ -464,11 +464,11 @@ mod linux {
         }
     }
 
-    pub fn get_last_write_time(filename: &str) -> Option<i64> {
-        const AT_FDCWD: i32 = -100;
-        const AT_STATX_SYNC_AS_STAT: i32 = 0x0000;
-        const STATX_MTIME: u32 = 0x00000040;
+    const AT_FDCWD: i32 = -100;
+    const AT_STATX_SYNC_AS_STAT: i32 = 0x0000;
+    const STATX_MTIME: u32 = 0x00000040;
 
+    pub fn get_last_write_time(filename: &str) -> Option<i64> {
         let mut stat = statx::default();
         if unsafe {
             statx(
@@ -485,28 +485,38 @@ mod linux {
         None
     }
 
-    pub fn load_game_code(filename: &str) -> GameCode {
+    pub fn load_game_code(filename: &str, lock_filename: &str) -> GameCode {
         debug_assert!(filename.ends_with('\0'));
 
         let mut game_code = GameCode::default();
         game_code.last_write_time = get_last_write_time(filename).unwrap();
+        let mut stat = statx::default();
         unsafe {
-            let game_code_library = dlopen(filename.as_ptr() as *const i8, RTLD_NOW);
-            game_code.handle = if !game_code_library.is_null() {
-                game_code.update_and_render_stub =
-                    std::mem::transmute::<*mut std::ffi::c_void, _>(dlsym(
-                        game_code_library,
-                        "game_update_and_render\0".as_ptr() as *const i8,
-                    ));
-                game_code.get_sound_samples_stub =
-                    std::mem::transmute::<*mut std::ffi::c_void, _>(dlsym(
-                        game_code_library,
-                        "game_get_sound_samples\0".as_ptr() as *const i8,
-                    ));
-                Some(game_code_library as *mut ())
-            } else {
-                None
-            };
+            if statx(
+                AT_FDCWD,
+                lock_filename.as_ptr() as *const _,
+                AT_STATX_SYNC_AS_STAT,
+                STATX_MTIME,
+                std::ptr::addr_of_mut!(stat),
+            ) != 0
+            {
+                let game_code_library = dlopen(filename.as_ptr() as *const i8, RTLD_NOW);
+                game_code.handle = if !game_code_library.is_null() {
+                    game_code.update_and_render_stub =
+                        std::mem::transmute::<*mut std::ffi::c_void, _>(dlsym(
+                            game_code_library,
+                            "game_update_and_render\0".as_ptr() as *const i8,
+                        ));
+                    game_code.get_sound_samples_stub =
+                        std::mem::transmute::<*mut std::ffi::c_void, _>(dlsym(
+                            game_code_library,
+                            "game_get_sound_samples\0".as_ptr() as *const i8,
+                        ));
+                    Some(game_code_library as *mut ())
+                } else {
+                    None
+                };
+            }
         }
         game_code
     }
@@ -3336,6 +3346,10 @@ fn main() {
         &mut source_gamecode_fullpath,
     );
 
+    let mut gamecode_lock_fullpath = linux::StateFileName::default();
+    let gamecode_lock_fullpath =
+        linux::build_exe_path_filename(&linux_state, "lock.tmp", &mut gamecode_lock_fullpath);
+
     libevdev::load_libevdev();
 
     let mut global_state = linux::GlobalState::default();
@@ -3473,7 +3487,8 @@ fn main() {
             let mut audio_latency_seconds;
             let mut sound_is_valid = false;
 
-            let mut game = linux::load_game_code(&source_gamecode_fullpath);
+            let mut game =
+                linux::load_game_code(&source_gamecode_fullpath, &gamecode_lock_fullpath);
 
             let mut last_cycle_count = linux::cycle_get_count();
             while global_state.running {
@@ -3481,7 +3496,8 @@ fn main() {
                     linux::get_last_write_time(source_gamecode_fullpath).unwrap();
                 if new_game_write_time != game.last_write_time {
                     linux::unload_game_code(&mut game);
-                    game = linux::load_game_code(&source_gamecode_fullpath);
+                    game =
+                        linux::load_game_code(&source_gamecode_fullpath, &gamecode_lock_fullpath);
                 }
 
                 let [new_input, old_input] = &mut inputs;

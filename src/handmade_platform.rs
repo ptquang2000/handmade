@@ -2,6 +2,27 @@ use super::*;
 
 pub type MemoryIndex = usize;
 
+macro_rules! kilobytes {
+    ($value:expr) => {
+        $value * 1024
+    };
+}
+macro_rules! megabytes {
+    ($value:expr) => {
+        kilobytes!($value) * 1024
+    };
+}
+macro_rules! gigabytes {
+    ($value:expr) => {
+        megabytes!($value) * 1024
+    };
+}
+macro_rules! terabytes {
+    ($value:expr) => {
+        gigabytes!($value) * 1024
+    };
+}
+
 #[derive(Default)]
 pub struct ThreadContext {
     _placeholder: i32,
@@ -142,52 +163,11 @@ pub struct GameMemory {
     pub free_file_memory_stub: Option<DebugPlatformFreeFileMemory>,
 }
 
-impl GameMemory {
-    pub fn get_game_state(&self) -> &mut GameState {
-        assert!(std::mem::size_of::<GameState>() <= self.transient_storage_size as usize);
-        unsafe { &mut *(self.permanent_storage_memory as *mut GameState) }
-    }
-
-    pub fn read_entire_file(
-        &self,
-        thread: &ThreadContext,
-        filename: &str,
-    ) -> Option<(*mut (), i64)> {
-        if let Some(func) = self.read_entire_file_stub {
-            func(thread, filename)
-        } else {
-            None
-        }
-    }
-
-    pub fn write_entire_file(
-        &self,
-        thread: &ThreadContext,
-        filename: &str,
-        memory: *mut (),
-        memory_size: i64,
-    ) -> bool {
-        if let Some(func) = self.write_entire_file_stub {
-            func(thread, filename, memory, memory_size)
-        } else {
-            false
-        }
-    }
-
-    fn free_file_memory(&self, thread: &ThreadContext, memory: *mut (), size: i64) {
-        if let Some(func) = self.free_file_memory_stub {
-            func(thread, memory, size)
-        }
-    }
-}
-
 pub type GameUpdateAndRender = extern "C" fn(
     thread: &ThreadContext,
     memory: &mut GameMemory,
     inputs: &mut GameInput,
     buffer: &mut GameOffscreenBuffer,
 );
-const _: GameUpdateAndRender = game_update_and_render;
 pub type GameGetSoundSample =
     extern "C" fn(thread: &ThreadContext, memory: &mut GameMemory, sound_buffer: &GameSoundBuffer);
-const _: GameGetSoundSample = game_get_sound_samples;

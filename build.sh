@@ -18,7 +18,9 @@ wayland-scanner client-header ${ALPHA_MOD_PATH}/alpha-modifier-v1.xml alpha-modi
 gcc -c alpha-modifier-protocol.c -o alpha-modifier-protocol.o
 ar rcs libalpha-modifier-protocol.a alpha-modifier-protocol.o
 
+echo WAITING FOR RDI > lock.tmp
 rustc $COMPILER_FLAGS $LINK_FLAGS --out-dir . $ROOT/src/handmade.rs --crate-type cdylib
+rm lock.tmp
 rustc $COMPILER_FLAGS $LINK_FLAGS --out-dir . $ROOT/src/linux_handmade.rs --crate-type bin
 
 popd >/dev/null

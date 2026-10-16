@@ -1,6 +1,13 @@
 use super::*;
 
 #[derive(Default, Clone, Copy)]
+pub struct TileMapDifference {
+    pub dx: f32,
+    pub dy: f32,
+    pub dz: f32,
+}
+
+#[derive(Default, Clone, Copy)]
 pub struct TileMapPosition {
     pub abs_tile_x: i32,
     pub abs_tile_y: i32,
@@ -226,6 +233,20 @@ pub fn are_on_same_tile(a: &TileMapPosition, b: &TileMapPosition) -> bool {
     let result = (a.abs_tile_x == b.abs_tile_x)
         && (a.abs_tile_y == b.abs_tile_y)
         && (a.abs_tile_z == b.abs_tile_z);
+
+    result
+}
+
+pub fn subtract(tile_map: &TileMap, a: TileMapPosition, b: TileMapPosition) -> TileMapDifference {
+    let mut result = TileMapDifference::default();
+
+    let dtile_x = a.abs_tile_x - b.abs_tile_x;
+    let dtile_y = a.abs_tile_y - b.abs_tile_y;
+    let dtile_z = a.abs_tile_z - b.abs_tile_z;
+
+    result.dx = tile_map.tile_side_in_meters * dtile_x as f32 + (a.offset_x - b.offset_x);
+    result.dy = tile_map.tile_side_in_meters * dtile_y as f32 + (a.offset_y - b.offset_y);
+    result.dz = tile_map.tile_side_in_meters * dtile_z as f32 + 0.0;
 
     result
 }
