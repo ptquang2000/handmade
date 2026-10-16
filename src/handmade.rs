@@ -69,12 +69,35 @@ struct World {
     tile_map: *mut TileMap,
 }
 
+#[derive(Default)]
+struct LoadedBitmap {
+    width: i32,
+    height: i32,
+    pixels: *mut u8,
+}
+
+impl LoadedBitmap {
+    fn pixels(&self, bytes_per_pixel: i32) -> &mut [u8] {
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.pixels,
+                (self.height * self.width * bytes_per_pixel) as usize,
+            )
+        }
+    }
+}
+
 pub struct GameState {
     world_arena: MemoryArena,
     world: *mut World,
 
     player_p: TileMapPosition,
-    pixel_pointer: *mut (),
+
+    back_drop: LoadedBitmap,
+
+    hero_head: LoadedBitmap,
+    hero_cape: LoadedBitmap,
+    hero_torso: LoadedBitmap,
 }
 
 fn draw_rectangle(
@@ -112,6 +135,28 @@ fn draw_rectangle(
     }
 }
 
+fn draw_bitmap(buffer: &mut GameOffscreenBuffer, bitmap: &LoadedBitmap, real_x: f32, real_y: f32) {
+    let min_x = round_f32_to_i32(real_x).max(0) as usize;
+    let min_y = round_f32_to_i32(real_y).max(0) as usize;
+    let max_x = round_f32_to_i32(real_x + bitmap.width as f32).min(buffer.width) as usize;
+    let max_y = round_f32_to_i32(real_y + bitmap.height as f32).min(buffer.height) as usize;
+
+    let source = bitmap
+        .pixels(buffer.bytes_per_pixel)
+        .chunks_exact_mut((bitmap.width * buffer.bytes_per_pixel) as usize)
+        .rev();
+    let dest = buffer
+        .as_slice_mut()
+        .chunks_exact_mut(buffer.pitch as usize);
+    for (dest_row, source_row) in dest.take(max_y).skip(min_y).zip(source) {
+        let dest_row = dest_row.chunks_exact_mut(buffer.bytes_per_pixel as usize);
+        let source_row = source_row.chunks_exact(buffer.bytes_per_pixel as usize);
+        for (dest, source) in dest_row.take(max_x).skip(min_x).zip(source_row) {
+            dest.copy_from_slice(source);
+        }
+    }
+}
+
 #[repr(C, packed(1))]
 #[derive(Debug)]
 struct BitmapHeader {
@@ -125,24 +170,40 @@ struct BitmapHeader {
     height: i32,
     planes: u16,
     bits_per_pixel: u16,
+    compression: u32,
+    size_of_bitmap: u32,
+    horz_resolution: i32,
+    vert_resolution: i32,
+    color_user: u32,
+    color_important: u32,
+
+    red_mask: u32,
+    green_mask: u32,
+    blue_mask: u32,
 }
 
-pub fn debug_load_bmp(
+fn debug_load_bmp(
     thread: &ThreadContext,
     read_entire_file: DebugPlatformReadEntireFile,
     file_name: &str,
-) -> *mut () {
-    let mut result = std::ptr::null_mut();
-
+) -> Option<LoadedBitmap> {
+    // NOTE: byte order in memory BB GG RR AA
+    // in little endian 0xAARRGGBB
     if let Some((content, size)) = read_entire_file(thread, file_name) {
         if size != 0 {
             let header = unsafe { content.cast::<BitmapHeader>().as_ref_unchecked() };
             let pixels = content.wrapping_byte_add(header.bitmap_offset as usize);
-            result = pixels;
+
+            let mut result = LoadedBitmap::default();
+            result.pixels = pixels as _;
+            result.width = header.width;
+            result.height = header.height;
+
+            return Some(result);
         }
     }
 
-    result
+    None
 }
 
 #[no_mangle]
@@ -158,11 +219,30 @@ extern "C" fn game_update_and_render(
     if !memory.is_initialized {
         let game_state = memory.get_game_state();
 
-        game_state.pixel_pointer = debug_load_bmp(
+        game_state.back_drop = debug_load_bmp(
             thread,
             memory.read_entire_file_stub.unwrap(),
             "test/test_background.bmp\0",
-        );
+        )
+        .unwrap();
+        game_state.hero_head = debug_load_bmp(
+            thread,
+            memory.read_entire_file_stub.unwrap(),
+            "test/test_hero_front_head.bmp\0",
+        )
+        .unwrap();
+        game_state.hero_cape = debug_load_bmp(
+            thread,
+            memory.read_entire_file_stub.unwrap(),
+            "test/test_hero_front_cape.bmp\0",
+        )
+        .unwrap();
+        game_state.hero_torso = debug_load_bmp(
+            thread,
+            memory.read_entire_file_stub.unwrap(),
+            "test/test_hero_front_torso.bmp\0",
+        )
+        .unwrap();
 
         game_state.player_p.abs_tile_x = 1;
         game_state.player_p.abs_tile_y = 3;
@@ -379,16 +459,7 @@ extern "C" fn game_update_and_render(
         }
     }
 
-    draw_rectangle(
-        buffer,
-        0.0,
-        0.0,
-        buffer.width as f32,
-        buffer.height as f32,
-        1.0,
-        0.0,
-        0.1,
-    );
+    draw_bitmap(buffer, &game_state.back_drop, 0., 0.);
 
     let screen_center_x = 0.5 * buffer.width as f32;
     let screen_center_y = 0.5 * buffer.height as f32;
@@ -404,7 +475,7 @@ extern "C" fn game_update_and_render(
                 game_state.player_p.abs_tile_z as u32,
             );
 
-            if tile_id > 0 {
+            if tile_id > 1 {
                 let mut gray = 0.5;
                 if tile_id == 2 {
                     gray = 1.0;
@@ -447,19 +518,7 @@ extern "C" fn game_update_and_render(
         player_g,
         player_b,
     );
-
-    #[cfg(any())]
-    {
-        let source = unsafe {
-            std::slice::from_raw_parts(
-                game_state.pixel_pointer as *const u8,
-                (buffer.width * buffer.pitch) as usize,
-            )
-        };
-        for (dest, source) in buffer.as_slice_mut().iter_mut().zip(source) {
-            *dest = *source;
-        }
-    }
+    draw_bitmap(buffer, &game_state.hero_head, player_left, player_top);
 }
 
 #[no_mangle]
