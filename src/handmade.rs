@@ -1,5 +1,6 @@
 #[path = "handmade_platform.rs"]
 mod platform;
+
 pub use self::platform::*;
 
 macro_rules! kilobytes {
@@ -148,11 +149,34 @@ fn draw_bitmap(buffer: &mut GameOffscreenBuffer, bitmap: &LoadedBitmap, real_x: 
     let dest = buffer
         .as_slice_mut()
         .chunks_exact_mut(buffer.pitch as usize);
+
     for (dest_row, source_row) in dest.take(max_y).skip(min_y).zip(source) {
-        let dest_row = dest_row.chunks_exact_mut(buffer.bytes_per_pixel as usize);
-        let source_row = source_row.chunks_exact(buffer.bytes_per_pixel as usize);
-        for (dest, source) in dest_row.take(max_x).skip(min_x).zip(source_row) {
-            dest.copy_from_slice(source);
+        for (dest, source) in dest_row
+            .chunks_exact_mut(buffer.bytes_per_pixel as usize)
+            .take(max_x)
+            .skip(min_x)
+            .zip(source_row.chunks_exact(buffer.bytes_per_pixel as usize))
+        {
+            let source_color = u32::from_ne_bytes([source[0], source[1], source[2], source[3]]);
+            let a = ((source_color >> 24) & 0xFF) as f32 / 255.0;
+            let sr = ((source_color >> 16) & 0xFF) as f32;
+            let sg = ((source_color >> 8) & 0xFF) as f32;
+            let sb = ((source_color >> 0) & 0xFF) as f32;
+
+            let dest_color = u32::from_ne_bytes([dest[0], dest[1], dest[2], dest[3]]);
+            let dr = ((dest_color >> 16) & 0xFF) as f32;
+            let dg = ((dest_color >> 8) & 0xFF) as f32;
+            let db = ((dest_color >> 0) & 0xFF) as f32;
+
+            let r = (1.0 - a) * dr + a * sr;
+            let g = (1.0 - a) * dg + a * sg;
+            let b = (1.0 - a) * db + a * sb;
+            dest.copy_from_slice(
+                &((((r + 0.5) as u32) << 16)
+                    | (((g + 0.5) as u32) << 8)
+                    | (((b + 0.5) as u32) << 0))
+                    .to_ne_bytes(),
+            );
         }
     }
 }
@@ -198,6 +222,33 @@ fn debug_load_bmp(
             result.pixels = pixels as _;
             result.width = header.width;
             result.height = header.height;
+
+            debug_assert!(header.compression == 3);
+
+            let red_mask = header.red_mask;
+            let green_mask = header.green_mask;
+            let blue_mask = header.blue_mask;
+            let alpha_mask = !(red_mask | green_mask | blue_mask);
+
+            let red_shift = red_mask.trailing_zeros();
+            let green_shift = green_mask.trailing_zeros();
+            let blue_shift = blue_mask.trailing_zeros();
+            let alpha_shift = alpha_mask.trailing_zeros();
+
+            let bytes_per_pixel = std::mem::size_of::<u32>();
+            for pixel in result
+                .pixels(bytes_per_pixel as i32)
+                .chunks_exact_mut(bytes_per_pixel)
+            {
+                let c = u32::from_ne_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
+                pixel.copy_from_slice(
+                    &((((c >> alpha_shift) & 0xFF) << 24)
+                        | (((c >> red_shift) & 0xFF) << 16)
+                        | (((c >> green_shift) & 0xFF) << 8)
+                        | (((c >> blue_shift) & 0xFF) << 0))
+                        .to_ne_bytes(),
+                );
+            }
 
             return Some(result);
         }

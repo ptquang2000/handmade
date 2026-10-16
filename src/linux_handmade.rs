@@ -23,7 +23,7 @@ mod debug_platform {
                     let result = linux::mmap(
                         std::ptr::null_mut(),
                         size as usize,
-                        linux::PROT_READ,
+                        linux::PROT_READ | linux::PROT_WRITE,
                         linux::MAP_PRIVATE,
                         fd,
                         0,
