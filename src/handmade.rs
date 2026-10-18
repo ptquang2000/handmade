@@ -85,6 +85,7 @@ pub struct GameState {
 
     camera_p: TileMapPosition,
     player_p: TileMapPosition,
+    dplayer_p: V2,
 
     back_drop: LoadedBitmap,
     hero_bitmaps: [HeroBitmaps; 4],
@@ -573,36 +574,42 @@ extern "C" fn game_update_and_render(
         if controller.is_connected {
             if controller.is_analog {
             } else {
-                let mut dplayer = V2::default();
+                let mut ddplayer = V2::default();
 
                 if controller.move_up().ended_down {
                     game_state.hero_facing_direction = 1;
-                    dplayer.y = 1.;
+                    ddplayer.y = 1.;
                 }
                 if controller.move_down().ended_down {
                     game_state.hero_facing_direction = 3;
-                    dplayer.y = -1.;
+                    ddplayer.y = -1.;
                 }
                 if controller.move_left().ended_down {
                     game_state.hero_facing_direction = 2;
-                    dplayer.x = -1.;
+                    ddplayer.x = -1.;
                 }
                 if controller.move_right().ended_down {
                     game_state.hero_facing_direction = 0;
-                    dplayer.x = 1.;
+                    ddplayer.x = 1.;
                 }
-                let mut player_speed = 2.0;
-                if controller.action_up().ended_down {
-                    player_speed = 10.0;
-                }
-                dplayer *= player_speed;
 
-                if dplayer.x != 0. && dplayer.y != 0. {
-                    dplayer *= std::f32::consts::FRAC_1_SQRT_2;
+                if ddplayer.x != 0. && ddplayer.y != 0. {
+                    ddplayer *= std::f32::consts::FRAC_1_SQRT_2;
                 }
+
+                let mut player_speed = 10.0;
+                if controller.action_up().ended_down {
+                    player_speed = 50.0;
+                }
+                ddplayer *= player_speed;
+
+                ddplayer += -1.5 * game_state.dplayer_p;
 
                 let mut new_player_p = game_state.player_p;
-                new_player_p.offset += inputs.dt_for_frame * dplayer;
+                new_player_p.offset = 0.5 * ddplayer * square(inputs.dt_for_frame)
+                    + game_state.dplayer_p * inputs.dt_for_frame
+                    + new_player_p.offset;
+                game_state.dplayer_p = ddplayer * inputs.dt_for_frame + game_state.dplayer_p;
                 new_player_p = recanonicalize_position(tile_map, new_player_p);
 
                 let mut player_left = new_player_p;

@@ -88,3 +88,9 @@ impl std::ops::Sub for V2 {
         result
     }
 }
+
+pub fn square(a: f32) -> f32 {
+    let result = a * a;
+
+    result
+}
