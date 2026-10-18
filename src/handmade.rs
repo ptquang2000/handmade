@@ -31,6 +31,10 @@ pub fn push_size_(arena: &mut MemoryArena, size: MemoryIndex) -> *mut u8 {
     result
 }
 
+#[path = "handmade_math.rs"]
+pub mod math;
+use self::math::*;
+
 #[path = "handmade_intrinsics.rs"]
 mod intrinsics;
 use self::intrinsics::*;
@@ -128,18 +132,16 @@ impl GameMemory {
 
 fn draw_rectangle(
     buffer: &mut GameOffscreenBuffer,
-    real_min_x: f32,
-    real_min_y: f32,
-    real_max_x: f32,
-    real_max_y: f32,
+    real_min: V2,
+    real_max: V2,
     r: f32,
     g: f32,
     b: f32,
 ) {
-    let max_x = round_f32_to_i32(real_max_x).min(buffer.width);
-    let max_y = round_f32_to_i32(real_max_y).min(buffer.height);
-    let min_x = round_f32_to_i32(real_min_x).max(0).min(max_x);
-    let min_y = round_f32_to_i32(real_min_y).max(0).min(max_y);
+    let max_x = round_f32_to_i32(real_max.x).min(buffer.width);
+    let max_y = round_f32_to_i32(real_max.y).min(buffer.height);
+    let min_x = round_f32_to_i32(real_min.x).max(0).min(max_x);
+    let min_y = round_f32_to_i32(real_min.y).max(0).min(max_y);
 
     let color = round_f32_to_u32(r * u8::MAX as f32) << 16
         | round_f32_to_u32(g * u8::MAX as f32) << 8
@@ -414,8 +416,7 @@ extern "C" fn game_update_and_render(
 
         game_state.player_p.abs_tile_x = 1;
         game_state.player_p.abs_tile_y = 3;
-        game_state.player_p.offset_x = 5.;
-        game_state.player_p.offset_y = 5.;
+        game_state.player_p.offset = V2 { x: 5., y: 5. };
 
         initialize_arena(
             &mut game_state.world_arena,
@@ -572,43 +573,44 @@ extern "C" fn game_update_and_render(
         if controller.is_connected {
             if controller.is_analog {
             } else {
-                let mut dplayer_x = 0.;
-                let mut dplayer_y = 0.;
+                let mut dplayer = V2::default();
 
                 if controller.move_up().ended_down {
                     game_state.hero_facing_direction = 1;
-                    dplayer_y = 1.;
+                    dplayer.y = 1.;
                 }
                 if controller.move_down().ended_down {
                     game_state.hero_facing_direction = 3;
-                    dplayer_y = -1.;
+                    dplayer.y = -1.;
                 }
                 if controller.move_left().ended_down {
                     game_state.hero_facing_direction = 2;
-                    dplayer_x = -1.;
+                    dplayer.x = -1.;
                 }
                 if controller.move_right().ended_down {
                     game_state.hero_facing_direction = 0;
-                    dplayer_x = 1.;
+                    dplayer.x = 1.;
                 }
                 let mut player_speed = 2.0;
                 if controller.action_up().ended_down {
                     player_speed = 10.0;
                 }
-                dplayer_x *= player_speed;
-                dplayer_y *= player_speed;
+                dplayer *= player_speed;
+
+                if dplayer.x != 0. && dplayer.y != 0. {
+                    dplayer *= std::f32::consts::FRAC_1_SQRT_2;
+                }
 
                 let mut new_player_p = game_state.player_p;
-                new_player_p.offset_x += inputs.dt_for_frame * dplayer_x;
-                new_player_p.offset_y += inputs.dt_for_frame * dplayer_y;
+                new_player_p.offset += inputs.dt_for_frame * dplayer;
                 new_player_p = recanonicalize_position(tile_map, new_player_p);
 
                 let mut player_left = new_player_p;
-                player_left.offset_x -= 0.5 * player_width;
+                player_left.offset.x -= 0.5 * player_width;
                 player_left = recanonicalize_position(tile_map, player_left);
 
                 let mut player_right = new_player_p;
-                player_right.offset_x += 0.5 * player_width;
+                player_right.offset.x += 0.5 * player_width;
                 player_right = recanonicalize_position(tile_map, player_right);
 
                 if is_tile_map_point_empty(tile_map, new_player_p)
@@ -631,16 +633,16 @@ extern "C" fn game_update_and_render(
                 game_state.camera_p.abs_tile_z = game_state.player_p.abs_tile_z;
 
                 let diff = subtract(tile_map, game_state.player_p, game_state.camera_p);
-                if diff.dx > (9. * tile_map.tile_side_in_meters) {
+                if diff.dxy.x > (9. * tile_map.tile_side_in_meters) {
                     game_state.camera_p.abs_tile_x += 17;
                 }
-                if diff.dx < -(9. * tile_map.tile_side_in_meters) {
+                if diff.dxy.x < -(9. * tile_map.tile_side_in_meters) {
                     game_state.camera_p.abs_tile_x -= 17;
                 }
-                if diff.dy > (5. * tile_map.tile_side_in_meters) {
+                if diff.dxy.y > (5. * tile_map.tile_side_in_meters) {
                     game_state.camera_p.abs_tile_y += 9;
                 }
-                if diff.dy < -(5. * tile_map.tile_side_in_meters) {
+                if diff.dxy.y < -(5. * tile_map.tile_side_in_meters) {
                     game_state.camera_p.abs_tile_y -= 9;
                 }
             }
@@ -678,15 +680,21 @@ extern "C" fn game_update_and_render(
                     gray = 0.
                 };
 
-                let cen_x = screen_center_x - meters_to_pixels * game_state.camera_p.offset_x
-                    + rel_column as f32 * tile_side_in_pixels as f32;
-                let cen_y = screen_center_y + meters_to_pixels * game_state.camera_p.offset_y
-                    - rel_row as f32 * tile_side_in_pixels as f32;
-                let min_x = cen_x - 0.5 * tile_side_in_pixels as f32;
-                let min_y = cen_y - 0.5 * tile_side_in_pixels as f32;
-                let max_x = cen_x + 0.5 * tile_side_in_pixels as f32;
-                let max_y = cen_y + 0.5 * tile_side_in_pixels as f32;
-                draw_rectangle(buffer, min_x, min_y, max_x, max_y, gray, gray, gray);
+                let cen = V2 {
+                    x: screen_center_x - meters_to_pixels * game_state.camera_p.offset.x
+                        + rel_column as f32 * tile_side_in_pixels as f32,
+                    y: screen_center_y + meters_to_pixels * game_state.camera_p.offset.y
+                        - rel_row as f32 * tile_side_in_pixels as f32,
+                };
+                let min = V2 {
+                    x: cen.x - 0.5 * tile_side_in_pixels as f32,
+                    y: cen.y - 0.5 * tile_side_in_pixels as f32,
+                };
+                let max = V2 {
+                    x: cen.x + 0.5 * tile_side_in_pixels as f32,
+                    y: cen.y + 0.5 * tile_side_in_pixels as f32,
+                };
+                draw_rectangle(buffer, min, max, gray, gray, gray);
             }
         }
     }
@@ -696,16 +704,20 @@ extern "C" fn game_update_and_render(
     let player_r = 1.0;
     let player_g = 1.0;
     let player_b = 0.0;
-    let player_ground_point_x = screen_center_x + diff.dx * meters_to_pixels;
-    let player_ground_point_y = screen_center_y - diff.dy * meters_to_pixels;
-    let player_left = player_ground_point_x - 0.5 * meters_to_pixels * player_width;
-    let player_top = player_ground_point_y - meters_to_pixels * player_height;
+    let player_ground_point_x = screen_center_x + diff.dxy.x * meters_to_pixels;
+    let player_ground_point_y = screen_center_y - diff.dxy.y * meters_to_pixels;
+    let player_left_top = V2 {
+        x: player_ground_point_x - 0.5 * meters_to_pixels * player_width,
+        y: player_ground_point_y - meters_to_pixels * player_height,
+    };
+    let player_width_height = V2 {
+        x: player_width,
+        y: player_height,
+    };
     draw_rectangle(
         buffer,
-        player_left,
-        player_top,
-        player_left + meters_to_pixels * player_width,
-        player_top + meters_to_pixels * player_height,
+        player_left_top,
+        player_left_top + meters_to_pixels * player_width_height,
         player_r,
         player_g,
         player_b,
