@@ -87,7 +87,7 @@ mod debug_platform {
 }
 
 mod linux {
-    use crate::{handmade, libevdev, pw, wl, wp_alpha, xdg};
+    use crate::{handmade, libevdev, pw, wl, wp, xdg};
 
     pub enum KeyCode {
         ESC = 1,
@@ -95,6 +95,7 @@ mod linux {
         W = 17,
         E = 18,
         P = 25,
+        RETURN = 28,
         A = 30,
         S = 31,
         D = 32,
@@ -130,8 +131,17 @@ mod linux {
         pub window: *mut xdg::xdg_surface,
         pub toplevel: *mut xdg::xdg_toplevel,
 
-        pub alpha: *mut wp_alpha::wp_alpha_modifier_v1,
-        pub alpha_surface: *mut wp_alpha::wp_alpha_modifier_surface_v1,
+        pub alpha: *mut wp::wp_alpha_modifier_v1,
+        pub alpha_surface: *mut wp::wp_alpha_modifier_surface_v1,
+
+        pub viewporter: *mut wp::wp_viewporter,
+        pub viewport: *mut wp::wp_viewport,
+        pub window_width: i32,
+        pub window_height: i32,
+
+        pub debug_show_cursor: bool,
+        pub alt_key_was_down: bool,
+        pub is_fullscreen: bool,
 
         pub game_input: *mut handmade::GameInput,
 
@@ -204,6 +214,8 @@ mod linux {
         );
         wl::shm_pool_destroy(pool);
         wl::buffer_add_listener(global_state.buffer, global_state);
+
+        xdg::toplevel_set_floating(global_state.toplevel, width, height);
     }
 
     pub fn display_buffer_in_window(global_state: &mut GlobalState, x: i32, y: i32) {
@@ -1230,7 +1242,7 @@ mod libevdev {
 }
 
 mod wl {
-    use crate::{linux, wl, wp_alpha, xdg};
+    use crate::{linux, wl, wp, xdg};
 
     const WL_DISPLAY_GET_REGISTRY: u32 = 1;
 
@@ -1253,6 +1265,8 @@ mod wl {
     const WL_SEAT_GET_KEYBOARD: u32 = 1;
 
     const WL_KEYBOARD_RELEASE: u32 = 0;
+
+    const WL_POINTER_SET_CURSOR: u32 = 0;
     const WL_POINTER_RELEASE: u32 = 1;
 
     pub enum SHMFormat {
@@ -1954,15 +1968,14 @@ mod wl {
             global_state.output =
                 registry_bind(registry, name, &wl_output_interface, version) as *mut wl::wl_output;
             output_add_listener(global_state.output, data.cast::<linux::GlobalState>());
-        } else if interface
-            == std::ffi::CStr::from_ptr(wp_alpha::wp_alpha_modifier_v1_interface.name)
-        {
-            global_state.alpha = registry_bind(
-                registry,
-                name,
-                &wp_alpha::wp_alpha_modifier_v1_interface,
-                version,
-            ) as *mut wp_alpha::wp_alpha_modifier_v1;
+        } else if interface == std::ffi::CStr::from_ptr(wp::wp_alpha_modifier_v1_interface.name) {
+            global_state.alpha =
+                registry_bind(registry, name, &wp::wp_alpha_modifier_v1_interface, version)
+                    as *mut wp::wp_alpha_modifier_v1;
+        } else if interface == std::ffi::CStr::from_ptr(wp::wp_viewporter_interface.name) {
+            global_state.viewporter =
+                registry_bind(registry, name, &wp::wp_viewporter_interface, version)
+                    as *mut wp::wp_viewporter;
         }
     }
 
@@ -2089,17 +2102,32 @@ mod wl {
             }
         } else {
         }
+
+        if global_state.alt_key_was_down && key == linux::KeyCode::RETURN as u32 {
+            if is_down {
+                if global_state.is_fullscreen {
+                    xdg::toplevel_unset_fullscreen(global_state.toplevel);
+                } else {
+                    xdg::toplevel_set_fullscreen(
+                        global_state.toplevel,
+                        global_state.output as *mut _,
+                    );
+                }
+            }
+        }
     }
 
     unsafe extern "C" fn keyboard_modifiers(
-        _data: *mut std::ffi::c_void,
+        data: *mut std::ffi::c_void,
         _keyboard: *mut wl_keyboard,
         _serial: std::ffi::c_uint,
-        _mods_depressed: std::ffi::c_uint,
+        mods_depressed: std::ffi::c_uint,
         _mods_latched: std::ffi::c_uint,
         _mods_locked: std::ffi::c_uint,
         _group: std::ffi::c_uint,
     ) {
+        let global_state = data.cast::<linux::GlobalState>().as_mut_unchecked();
+        global_state.alt_key_was_down = (mods_depressed & (1 << 3)) != 0;
     }
 
     unsafe extern "C" fn keyboard_repeat_info(
@@ -2111,13 +2139,18 @@ mod wl {
     }
 
     unsafe extern "C" fn pointer_enter(
-        _data: *mut std::ffi::c_void,
-        _pointer: *mut wl_pointer,
-        _serial: std::ffi::c_uint,
+        data: *mut std::ffi::c_void,
+        pointer: *mut wl_pointer,
+        serial: std::ffi::c_uint,
         _surface: *mut wl_surface,
         _surface_x: WlFixedT,
         _surface_y: WlFixedT,
     ) {
+        let global_state = &mut *data.cast::<linux::GlobalState>();
+        if global_state.debug_show_cursor {
+        } else {
+            pointer_set_cursor(pointer, serial, std::ptr::null_mut(), 0, 0);
+        }
     }
 
     unsafe extern "C" fn pointer_leave(
@@ -2135,10 +2168,13 @@ mod wl {
         surface_x: WlFixedT,
         surface_y: WlFixedT,
     ) {
-        let global_state = &mut *data.cast::<linux::GlobalState>();
-        (*global_state.game_input).mouse_x = (surface_x + 128) >> 8;
-        (*global_state.game_input).mouse_y = (surface_y + 128) >> 8;
-        (*global_state.game_input).mouse_z = 0;
+        let global_state = data.cast::<linux::GlobalState>().as_mut_unchecked();
+        let game_input = global_state.game_input.as_mut_unchecked();
+        game_input.mouse_x =
+            ((surface_x + 128) >> 8) * global_state.back_buffer.width / global_state.window_width;
+        game_input.mouse_y =
+            ((surface_y + 128) >> 8) * global_state.back_buffer.height / global_state.window_height;
+        game_input.mouse_z = 0;
     }
 
     unsafe extern "C" fn pointer_button(
@@ -2388,6 +2424,31 @@ mod wl {
         }
     }
 
+    fn pointer_set_cursor(
+        pointer: *mut wl_pointer,
+        serial: std::ffi::c_uint,
+        surface: *mut wl_surface,
+        hotspot_x: std::ffi::c_int,
+        hotspot_y: std::ffi::c_int,
+    ) -> *mut wl_proxy {
+        let proxy = pointer as *mut wl_proxy;
+        unsafe {
+            let mut args: [wl_argument; 10] = std::mem::zeroed();
+            args[0].u = serial;
+            args[1].o = surface as *mut _;
+            args[2].i = hotspot_x;
+            args[3].i = hotspot_y;
+            wl_proxy_marshal_array_flags(
+                proxy,
+                WL_POINTER_SET_CURSOR,
+                std::ptr::null(),
+                wl_proxy_get_version(proxy),
+                0,
+                args.as_mut_ptr() as *mut wl_argument,
+            )
+        }
+    }
+
     fn output_add_listener(
         output: *mut wl_output,
         global_state: *mut linux::GlobalState,
@@ -2403,7 +2464,7 @@ mod wl {
 }
 
 mod xdg {
-    use crate::{linux, wl, wp_alpha};
+    use crate::{linux, wl, wp};
 
     const XDG_WM_BASE_GET_XDG_SURFACE: u32 = 2;
     const XDG_WM_BASE_PONG: u32 = 3;
@@ -2414,7 +2475,10 @@ mod xdg {
     const XDG_TOPLEVEL_SET_TITLE: u32 = 2;
     const XDG_TOPLEVEL_SET_MAX_SIZE: u32 = 7;
     const XDG_TOPLEVEL_SET_MIN_SIZE: u32 = 8;
+    const XDG_TOPLEVEL_SET_FULLSCREEN: u32 = 11;
+    const XDG_TOPLEVEL_UNSET_FULLSCREEN: u32 = 12;
 
+    const XDG_TOPLEVEL_STATE_FULLSCREEN: u32 = 2;
     const XDG_TOPLEVEL_STATE_ACTIVATED: u32 = 4;
 
     pub fn wm_add_listener(wm: *mut xdg_wm_base, global_state: *mut linux::GlobalState) {
@@ -2533,6 +2597,36 @@ mod xdg {
         }
     }
 
+    pub fn toplevel_set_fullscreen(toplevel: *mut xdg_toplevel, output: *mut wl::wl_object) {
+        let proxy = toplevel as *mut wl::wl_proxy;
+        unsafe {
+            let mut args: [wl::wl_argument; 10] = std::mem::zeroed();
+            args[0].o = output;
+            wl::wl_proxy_marshal_array_flags(
+                proxy,
+                XDG_TOPLEVEL_SET_FULLSCREEN,
+                std::ptr::null(),
+                wl::wl_proxy_get_version(proxy),
+                0,
+                args.as_mut_ptr(),
+            );
+        }
+    }
+
+    pub fn toplevel_unset_fullscreen(toplevel: *mut xdg_toplevel) {
+        let proxy = toplevel as *mut wl::wl_proxy;
+        unsafe {
+            wl::wl_proxy_marshal_array_flags(
+                proxy,
+                XDG_TOPLEVEL_UNSET_FULLSCREEN,
+                std::ptr::null(),
+                wl::wl_proxy_get_version(proxy),
+                0,
+                std::ptr::null_mut(),
+            );
+        }
+    }
+
     #[no_mangle]
     pub static mut wm_listener: xdg_wm_base_listener = xdg_wm_base_listener {
         ping: Some(wm_ping),
@@ -2628,18 +2722,23 @@ mod xdg {
         height: std::ffi::c_int,
         states: *mut wl::wl_array,
     ) {
-        let global_state = &mut *data.cast::<linux::GlobalState>();
-        linux::resize_shared_buffer(global_state, width, height);
+        let global_state = data.cast::<linux::GlobalState>().as_mut_unchecked();
+        global_state.window_width = width;
+        global_state.window_height = height;
+        wp::viewport_set_destination(global_state.viewport, width, height);
 
-        let arr = &*states;
-        let data = arr.data as *const u32;
-        let activated = (0..arr.size / std::mem::size_of::<u32>())
-            .any(|i| *data.add(i as usize) == XDG_TOPLEVEL_STATE_ACTIVATED);
-        if activated {
-            wp_alpha::set_multiplier(global_state.alpha_surface, u32::MAX);
+        let arr = states.as_mut_unchecked();
+        let states = std::slice::from_raw_parts(
+            arr.data as *const u32,
+            arr.size / std::mem::size_of::<u32>(),
+        );
+        if states.contains(&XDG_TOPLEVEL_STATE_ACTIVATED) {
+            wp::alpha_set_multiplier(global_state.alpha_surface, u32::MAX);
         } else {
-            wp_alpha::set_multiplier(global_state.alpha_surface, (0.1 * u32::MAX as f32) as u32);
+            wp::alpha_set_multiplier(global_state.alpha_surface, (0.1 * u32::MAX as f32) as u32);
         }
+
+        global_state.is_fullscreen = states.contains(&XDG_TOPLEVEL_STATE_FULLSCREEN);
     }
 
     unsafe extern "C" fn toplevel_close(data: *mut std::ffi::c_void, _toplevel: *mut xdg_toplevel) {
@@ -2695,11 +2794,11 @@ mod xdg {
     }
 }
 
-mod wp_alpha {
+mod wp {
     use crate::wl;
 
-    const MODIFIER_V1_GET_SURFACE: u32 = 1;
-    const MODIFIER_SURFACE_V1_SET_MULTIPLIER: u32 = 1;
+    const ALPHA_MODIFIER_V1_GET_SURFACE: u32 = 1;
+    const ALPHA_MODIFIER_SURFACE_V1_SET_MULTIPLIER: u32 = 1;
 
     #[repr(C)]
     pub struct wp_alpha_modifier_v1 {
@@ -2712,7 +2811,7 @@ mod wp_alpha {
         _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
     }
 
-    pub fn get_surface(
+    pub fn alpha_get_surface(
         manager: *mut wp_alpha_modifier_v1,
         surface: *mut wl::wl_surface,
     ) -> *mut wp_alpha_modifier_surface_v1 {
@@ -2723,7 +2822,7 @@ mod wp_alpha {
             args[1].o = surface as *mut wl::wl_object;
             wl::wl_proxy_marshal_array_flags(
                 proxy,
-                MODIFIER_V1_GET_SURFACE,
+                ALPHA_MODIFIER_V1_GET_SURFACE,
                 &wp_alpha_modifier_surface_v1_interface,
                 wl::wl_proxy_get_version(proxy),
                 0,
@@ -2732,14 +2831,14 @@ mod wp_alpha {
         }
     }
 
-    pub fn set_multiplier(surface: *mut wp_alpha_modifier_surface_v1, factor: u32) {
+    pub fn alpha_set_multiplier(surface: *mut wp_alpha_modifier_surface_v1, factor: u32) {
         let proxy = surface as *mut wl::wl_proxy;
         unsafe {
             let mut args: [wl::wl_argument; 10] = std::mem::zeroed();
             args[0].u = factor;
             wl::wl_proxy_marshal_array_flags(
                 proxy,
-                MODIFIER_SURFACE_V1_SET_MULTIPLIER,
+                ALPHA_MODIFIER_SURFACE_V1_SET_MULTIPLIER,
                 std::ptr::null(),
                 wl::wl_proxy_get_version(proxy),
                 0,
@@ -2752,6 +2851,63 @@ mod wp_alpha {
     extern "C" {
         pub static wp_alpha_modifier_v1_interface: wl::wl_interface;
         pub static wp_alpha_modifier_surface_v1_interface: wl::wl_interface;
+    }
+
+    #[repr(C)]
+    pub struct wp_viewporter {
+        _data: (),
+        _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    }
+    #[repr(C)]
+    pub struct wp_viewport {
+        _data: (),
+        _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    }
+
+    const WP_VIEWPORTER_GET_VIEWPORT: u32 = 1;
+    const WP_VIEWPORT_SET_DESTINATION: u32 = 2;
+
+    pub fn viewporter_get_viewport(
+        viewporter: *mut wp_viewporter,
+        surface: *mut wl::wl_surface,
+    ) -> *mut wp_viewport {
+        let proxy = viewporter as *mut wl::wl_proxy;
+        unsafe {
+            let mut args: [wl::wl_argument; 10] = std::mem::zeroed();
+            args[0].n = 0;
+            args[1].o = surface as *mut wl::wl_object;
+            wl::wl_proxy_marshal_array_flags(
+                proxy,
+                WP_VIEWPORTER_GET_VIEWPORT,
+                &wp_viewport_interface,
+                wl::wl_proxy_get_version(proxy),
+                0,
+                args.as_mut_ptr(),
+            ) as *mut _
+        }
+    }
+
+    pub fn viewport_set_destination(viewport: *mut wp_viewport, width: i32, height: i32) {
+        let proxy = viewport as *mut wl::wl_proxy;
+        unsafe {
+            let mut args: [wl::wl_argument; 10] = std::mem::zeroed();
+            args[0].i = width;
+            args[1].i = height;
+            wl::wl_proxy_marshal_array_flags(
+                proxy,
+                WP_VIEWPORT_SET_DESTINATION,
+                std::ptr::null_mut(),
+                wl::wl_proxy_get_version(proxy),
+                0,
+                args.as_mut_ptr(),
+            );
+        }
+    }
+
+    #[link(name = "viewporter-protocol", kind = "static")]
+    extern "C" {
+        pub static wp_viewporter_interface: wl::wl_interface;
+        pub static wp_viewport_interface: wl::wl_interface;
     }
 }
 
@@ -3353,11 +3509,15 @@ fn main() {
     libevdev::load_libevdev();
 
     let mut global_state = linux::GlobalState::default();
+
     global_state
         .buffer_released
         .store(true, std::sync::atomic::Ordering::Relaxed);
     global_state.running = true;
     global_state.back_buffer.bytes_per_pixel = std::mem::size_of::<i32>() as i32;
+    if cfg!(HANDMADE_INTERNAL) {
+        global_state.debug_show_cursor = true;
+    }
 
     if let Some(display) = wl::display_connect("") {
         let registry = wl::display_get_registry(display);
@@ -3375,17 +3535,16 @@ fn main() {
         xdg::toplevel_set_title(global_state.toplevel, "Handmade Hero\0");
         xdg::toplevel_add_listener(global_state.toplevel, &mut global_state);
 
+        debug_assert!(!global_state.viewporter.is_null());
+        global_state.viewport =
+            wp::viewporter_get_viewport(global_state.viewporter, global_state.surface);
+
         debug_assert!(!global_state.alpha.is_null());
         global_state.alpha_surface =
-            wp_alpha::get_surface(global_state.alpha, global_state.surface);
+            wp::alpha_get_surface(global_state.alpha, global_state.surface);
 
         wl::surface_commit(global_state.surface);
         linux::resize_shared_buffer(&mut global_state, 960, 540);
-        xdg::toplevel_set_floating(
-            global_state.toplevel,
-            global_state.back_buffer.width,
-            global_state.back_buffer.height,
-        );
 
         let monitor_refresh_hz = if global_state.refresh_rate > 0 {
             global_state.refresh_rate
