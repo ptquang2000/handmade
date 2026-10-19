@@ -164,6 +164,12 @@ impl TileMapPosition {
     }
 }
 
+pub fn is_tile_value_empty(tile_value: u32) -> bool {
+    let empty = (tile_value == 1) || (tile_value == 3) || (tile_value == 4);
+
+    empty
+}
+
 pub fn is_tile_map_point_empty(tile_map: &TileMap, pos: TileMapPosition) -> bool {
     let tile_chunk_value = get_tile_value(
         tile_map,
@@ -246,6 +252,16 @@ pub fn subtract(tile_map: &TileMap, a: TileMapPosition, b: TileMapPosition) -> T
 
     result.dxy = tile_map.tile_side_in_meters * dtile_xy + (a.offset - b.offset);
     result.dz = tile_map.tile_side_in_meters * dtile_z as f32 + 0.0;
+
+    result
+}
+
+pub fn centered_tile_point(abs_tile_x: u32, abs_tile_y: u32, abs_tile_z: u32) -> TileMapPosition {
+    let mut result = TileMapPosition::default();
+
+    result.abs_tile_x = abs_tile_x as i32;
+    result.abs_tile_y = abs_tile_y as i32;
+    result.abs_tile_z = abs_tile_z as i32;
 
     result
 }

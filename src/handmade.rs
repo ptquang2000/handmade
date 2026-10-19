@@ -570,6 +570,7 @@ extern "C" fn game_update_and_render(
     let lower_left_x = -tile_side_in_pixels as f32 / 2.;
     let lower_left_y = buffer.height as f32;
 
+    let old_player_p = game_state.player_p;
     for controller in &mut inputs.controllers {
         if controller.is_connected {
             if controller.is_analog {
@@ -606,83 +607,127 @@ extern "C" fn game_update_and_render(
                 ddplayer += -1.5 * game_state.dplayer_p;
 
                 let mut new_player_p = game_state.player_p;
-                new_player_p.offset = 0.5 * ddplayer * square(inputs.dt_for_frame)
-                    + game_state.dplayer_p * inputs.dt_for_frame
-                    + new_player_p.offset;
+                let player_delta = 0.5 * ddplayer * square(inputs.dt_for_frame)
+                    + game_state.dplayer_p * inputs.dt_for_frame;
+                new_player_p.offset += player_delta;
                 game_state.dplayer_p = ddplayer * inputs.dt_for_frame + game_state.dplayer_p;
                 new_player_p = recanonicalize_position(tile_map, new_player_p);
+                #[cfg(all())]
+                {
+                    let mut player_left = new_player_p;
+                    player_left.offset.x -= 0.5 * player_width;
+                    player_left = recanonicalize_position(tile_map, player_left);
 
-                let mut player_left = new_player_p;
-                player_left.offset.x -= 0.5 * player_width;
-                player_left = recanonicalize_position(tile_map, player_left);
+                    let mut player_right = new_player_p;
+                    player_right.offset.x += 0.5 * player_width;
+                    player_right = recanonicalize_position(tile_map, player_right);
 
-                let mut player_right = new_player_p;
-                player_right.offset.x += 0.5 * player_width;
-                player_right = recanonicalize_position(tile_map, player_right);
+                    let mut collided = false;
+                    let mut col_p = TileMapPosition::default();
+                    if !is_tile_map_point_empty(tile_map, new_player_p) {
+                        col_p = new_player_p;
+                        collided = true;
+                    }
+                    if !is_tile_map_point_empty(tile_map, player_left) {
+                        col_p = player_left;
+                        collided = true;
+                    }
+                    if !is_tile_map_point_empty(tile_map, player_right) {
+                        col_p = player_right;
+                        collided = true;
+                    }
 
-                let mut collided = false;
-                let mut col_p = TileMapPosition::default();
-                if !is_tile_map_point_empty(tile_map, new_player_p) {
-                    col_p = new_player_p;
-                    collided = true;
+                    if collided {
+                        let mut r = V2::default();
+                        if col_p.abs_tile_x < game_state.player_p.abs_tile_x {
+                            r = V2 { x: 1., y: 0. };
+                        }
+                        if col_p.abs_tile_x > game_state.player_p.abs_tile_x {
+                            r = V2 { x: -1., y: 0. };
+                        }
+                        if col_p.abs_tile_y < game_state.player_p.abs_tile_y {
+                            r = V2 { x: 0., y: 1. };
+                        }
+                        if col_p.abs_tile_y > game_state.player_p.abs_tile_y {
+                            r = V2 { x: 0., y: -1. };
+                        }
+
+                        game_state.dplayer_p =
+                            game_state.dplayer_p - 1. * game_state.dplayer_p.inner(r) * r;
+                    } else {
+                        game_state.player_p = new_player_p;
+                    }
                 }
-                if !is_tile_map_point_empty(tile_map, player_left) {
-                    col_p = player_left;
-                    collided = true;
-                }
-                if !is_tile_map_point_empty(tile_map, player_right) {
-                    col_p = player_right;
-                    collided = true;
-                }
+                #[cfg(any())]
+                {
+                    let min_tile_x = 0u32;
+                    let min_tile_y = 0u32;
+                    let one_past_max_tile_x = 0u32;
+                    let one_past_max_tile_y = 0u32;
+                    let abs_tile_z = 0;
+                    let mut best_player_p = game_state.player_p;
+                    let best_distance_sq = player_delta.length_sq();
+                    for abs_tile_y in min_tile_y..one_past_max_tile_y {
+                        for abs_tile_x in min_tile_x..one_past_max_tile_x {
+                            let test_tile_p =
+                                centered_tile_point(abs_tile_x, abs_tile_y, abs_tile_z);
+                            let tile_value = test_tile_p.get_tile_value(tile_map);
+                            if is_tile_value_empty(tile_value) {
+                                let min_corner = -0.5
+                                    * V2 {
+                                        x: tile_map.tile_side_in_meters,
+                                        y: tile_map.tile_side_in_meters,
+                                    };
+                                let max_corner = 0.5
+                                    * V2 {
+                                        x: tile_map.tile_side_in_meters,
+                                        y: tile_map.tile_side_in_meters,
+                                    };
 
-                if collided {
-                    let mut r = V2::default();
-                    if col_p.abs_tile_x < game_state.player_p.abs_tile_x {
-                        r = V2 { x: 1., y: 0. };
-                    }
-                    if col_p.abs_tile_x > game_state.player_p.abs_tile_x {
-                        r = V2 { x: -1., y: 0. };
-                    }
-                    if col_p.abs_tile_y < game_state.player_p.abs_tile_y {
-                        r = V2 { x: 0., y: 1. };
-                    }
-                    if col_p.abs_tile_y > game_state.player_p.abs_tile_y {
-                        r = V2 { x: 0., y: -1. };
-                    }
-
-                    game_state.dplayer_p =
-                        game_state.dplayer_p - 1. * game_state.dplayer_p.inner(r) * r;
-                } else {
-                    if !are_on_same_tile(&game_state.player_p, &new_player_p) {
-                        let new_tile_value = new_player_p.get_tile_value(tile_map);
-
-                        if new_tile_value == 3 {
-                            new_player_p.abs_tile_z += 1;
-                        } else if new_tile_value == 4 {
-                            new_player_p.abs_tile_z -= 1;
+                                let rel_new_player_p =
+                                    subtract(tile_map, test_tile_p, new_player_p);
+                                let test_p = closest_point_in_rectangle(
+                                    min_corner,
+                                    max_corner,
+                                    rel_new_player_p,
+                                );
+                                let test_distance_sq = test_p.offset.length_sq();
+                                if best_distance_sq > test_distance_sq {
+                                    best_player_p = test_p;
+                                    best_distance_sq = test_distance_sq;
+                                }
+                            }
                         }
                     }
-
-                    game_state.player_p = new_player_p;
-                }
-
-                game_state.camera_p.abs_tile_z = game_state.player_p.abs_tile_z;
-
-                let diff = subtract(tile_map, game_state.player_p, game_state.camera_p);
-                if diff.dxy.x > (9. * tile_map.tile_side_in_meters) {
-                    game_state.camera_p.abs_tile_x += 17;
-                }
-                if diff.dxy.x < -(9. * tile_map.tile_side_in_meters) {
-                    game_state.camera_p.abs_tile_x -= 17;
-                }
-                if diff.dxy.y > (5. * tile_map.tile_side_in_meters) {
-                    game_state.camera_p.abs_tile_y += 9;
-                }
-                if diff.dxy.y < -(5. * tile_map.tile_side_in_meters) {
-                    game_state.camera_p.abs_tile_y -= 9;
                 }
             }
         }
+    }
+
+    if !are_on_same_tile(&old_player_p, &game_state.player_p) {
+        let new_tile_value = game_state.player_p.get_tile_value(tile_map);
+
+        if new_tile_value == 3 {
+            game_state.player_p.abs_tile_z += 1;
+        } else if new_tile_value == 4 {
+            game_state.player_p.abs_tile_z -= 1;
+        }
+    }
+
+    game_state.camera_p.abs_tile_z = game_state.player_p.abs_tile_z;
+
+    let diff = subtract(tile_map, game_state.player_p, game_state.camera_p);
+    if diff.dxy.x > (9. * tile_map.tile_side_in_meters) {
+        game_state.camera_p.abs_tile_x += 17;
+    }
+    if diff.dxy.x < -(9. * tile_map.tile_side_in_meters) {
+        game_state.camera_p.abs_tile_x -= 17;
+    }
+    if diff.dxy.y > (5. * tile_map.tile_side_in_meters) {
+        game_state.camera_p.abs_tile_y += 9;
+    }
+    if diff.dxy.y < -(5. * tile_map.tile_side_in_meters) {
+        game_state.camera_p.abs_tile_y -= 9;
     }
 
     draw_bitmap(buffer, &game_state.back_drop, 0., 0., 0, 0);
@@ -692,8 +737,8 @@ extern "C" fn game_update_and_render(
 
     for rel_row in -10..10i32 {
         for rel_column in -20..20i32 {
-            let column = game_state.camera_p.abs_tile_x + rel_column;
-            let row = game_state.camera_p.abs_tile_y + rel_row;
+            let column = game_state.camera_p.abs_tile_x as i32 + rel_column;
+            let row = game_state.camera_p.abs_tile_y as i32 + rel_row;
             let tile_id = get_tile_value(
                 tile_map,
                 column as u32,
@@ -711,7 +756,8 @@ extern "C" fn game_update_and_render(
                     gray = 0.25;
                 }
 
-                if column == game_state.camera_p.abs_tile_x && row == game_state.camera_p.abs_tile_y
+                if column == game_state.camera_p.abs_tile_x as i32
+                    && row == game_state.camera_p.abs_tile_y as i32
                 {
                     gray = 0.
                 };

@@ -103,4 +103,10 @@ impl V2 {
 
         result
     }
+
+    pub fn length_sq(&self) -> f32 {
+        let result = self.inner(self.clone());
+
+        result
+    }
 }
