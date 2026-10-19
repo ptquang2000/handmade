@@ -620,10 +620,39 @@ extern "C" fn game_update_and_render(
                 player_right.offset.x += 0.5 * player_width;
                 player_right = recanonicalize_position(tile_map, player_right);
 
-                if is_tile_map_point_empty(tile_map, new_player_p)
-                    && is_tile_map_point_empty(tile_map, player_left)
-                    && is_tile_map_point_empty(tile_map, player_right)
-                {
+                let mut collided = false;
+                let mut col_p = TileMapPosition::default();
+                if !is_tile_map_point_empty(tile_map, new_player_p) {
+                    col_p = new_player_p;
+                    collided = true;
+                }
+                if !is_tile_map_point_empty(tile_map, player_left) {
+                    col_p = player_left;
+                    collided = true;
+                }
+                if !is_tile_map_point_empty(tile_map, player_right) {
+                    col_p = player_right;
+                    collided = true;
+                }
+
+                if collided {
+                    let mut r = V2::default();
+                    if col_p.abs_tile_x < game_state.player_p.abs_tile_x {
+                        r = V2 { x: 1., y: 0. };
+                    }
+                    if col_p.abs_tile_x > game_state.player_p.abs_tile_x {
+                        r = V2 { x: -1., y: 0. };
+                    }
+                    if col_p.abs_tile_y < game_state.player_p.abs_tile_y {
+                        r = V2 { x: 0., y: 1. };
+                    }
+                    if col_p.abs_tile_y > game_state.player_p.abs_tile_y {
+                        r = V2 { x: 0., y: -1. };
+                    }
+
+                    game_state.dplayer_p =
+                        game_state.dplayer_p - 1. * game_state.dplayer_p.inner(r) * r;
+                } else {
                     if !are_on_same_tile(&game_state.player_p, &new_player_p) {
                         let new_tile_value = new_player_p.get_tile_value(tile_map);
 

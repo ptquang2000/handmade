@@ -94,3 +94,13 @@ pub fn square(a: f32) -> f32 {
 
     result
 }
+
+impl V2 {
+    pub fn inner(&self, other: V2) -> f32 {
+        let mut result = 0.0;
+
+        result = self.x * other.x + self.y * other.y;
+
+        result
+    }
+}
