@@ -1,3 +1,8 @@
+pub fn absolute_value(float32: f32) -> f32 {
+    let result = float32.abs() as f32;
+    result
+}
+
 pub fn round_f32_to_i32(float32: f32) -> i32 {
     let result = float32.round() as i32;
     result

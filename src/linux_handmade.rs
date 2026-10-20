@@ -3762,7 +3762,7 @@ fn main() {
                                 libevdev::get_controller_value(
                                     controllers[controller_index],
                                     libevdev::EV_KEY,
-                                    libevdev::BTN_NORTH,
+                                    libevdev::BTN_START,
                                 ),
                                 new_controller.start(),
                             );

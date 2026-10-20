@@ -2,6 +2,17 @@ use super::*;
 
 pub type MemoryIndex = usize;
 
+pub trait ArrayLength {
+    const LEN: usize;
+}
+impl<T, const N: usize> ArrayLength for [T; N] {
+    const LEN: usize = N;
+}
+macro_rules! array_len {
+    ($type:ty) => {
+        <$type as ArrayLength>::LEN
+    };
+}
 macro_rules! kilobytes {
     ($value:expr) => {
         $value * 1024
@@ -135,6 +146,7 @@ impl GameControllerInput {
     }
 }
 
+pub type Controllers = [GameControllerInput; 5];
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 pub struct GameInput {
@@ -145,7 +157,7 @@ pub struct GameInput {
 
     pub dt_for_frame: f32,
 
-    pub controllers: [GameControllerInput; 5],
+    pub controllers: Controllers,
 }
 
 #[derive(Default)]
