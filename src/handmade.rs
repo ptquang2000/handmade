@@ -345,8 +345,7 @@ fn initialize_player(game_state: &mut GameState, entity_index: usize) {
     entity.exists = true;
     entity.p.abs_tile_x = 1;
     entity.p.abs_tile_y = 3;
-    entity.p.offset.x = 5.;
-    entity.p.offset.y = 5.;
+    entity.p.offset_ = V2::default();
     entity.height = 1.4;
     entity.width = 0.75 * entity.height;
 
@@ -410,18 +409,16 @@ fn move_player(game_state: &mut GameState, entity: &mut Entity, dt: f32, mut ddp
     let old_player_p = entity.p;
     let player_delta = 0.5 * ddp * square(dt) + entity.dp * dt;
     entity.dp = ddp * dt + entity.dp;
+    let mut new_player_p = old_player_p.offset(tile_map, player_delta);
 
-    let mut new_player_p = old_player_p;
-    new_player_p.offset += player_delta;
-    new_player_p = recanonicalize_position(tile_map, new_player_p);
     cfg_select! {
         false => {
             let mut player_left = new_player_p;
-            player_left.offset.x -= 0.5 * entity.width;
+            player_left.offset_.x -= 0.5 * entity.width;
             player_left = recanonicalize_position(tile_map, player_left);
 
             let mut player_right = new_player_p;
-            player_right.offset.x += 0.5 * entity.width;
+            player_right.offset_.x += 0.5 * entity.width;
             player_right = recanonicalize_position(tile_map, player_right);
 
             let mut collided = false;
@@ -460,17 +457,34 @@ fn move_player(game_state: &mut GameState, entity: &mut Entity, dt: f32, mut ddp
             }
         }
         _ => {
-            let min_tile_x = old_player_p.abs_tile_x.min(new_player_p.abs_tile_x);
-            let min_tile_y = old_player_p.abs_tile_y.min(new_player_p.abs_tile_y);
-            let one_past_max_tile_x = old_player_p.abs_tile_x.max(new_player_p.abs_tile_x) + 1;
-            let one_past_max_tile_y = old_player_p.abs_tile_y.max(new_player_p.abs_tile_y) + 1;
+            cfg_select! {
+                false => {
+                    let min_tile_x = old_player_p.abs_tile_x.min(new_player_p.abs_tile_x);
+                    let min_tile_y = old_player_p.abs_tile_y.min(new_player_p.abs_tile_y);
+                    let one_past_max_tile_x =
+                        old_player_p.abs_tile_x.max(new_player_p.abs_tile_x) + 1;
+                    let one_past_max_tile_y =
+                        old_player_p.abs_tile_y.max(new_player_p.abs_tile_y) + 1;
+                }
+                true => {
+                    let start_tile_x = old_player_p.abs_tile_x;
+                    let start_tile_y = old_player_p.abs_tile_x;
+                    let end_tile_x = new_player_p.abs_tile_x;
+                    let end_tile_y = new_player_p.abs_tile_y;
+
+                    let delta_x = sign_of(end_tile_x as i32 - start_tile_x as i32);
+                    let delta_y = sign_of(end_tile_y as i32 - start_tile_y as i32);
+                }
+            }
 
             let abs_tile_z = entity.p.abs_tile_z;
             let mut t_min = 1.0;
-            for abs_tile_y in min_tile_y..one_past_max_tile_y {
-                for abs_tile_x in min_tile_x..one_past_max_tile_x {
-                    let test_tile_p =
-                        centered_tile_point(abs_tile_x, abs_tile_y, abs_tile_z);
+
+            let mut abs_tile_y = start_tile_y;
+            loop {
+                let mut abs_tile_x = start_tile_x;
+                loop {
+                    let test_tile_p = centered_tile_point(abs_tile_x, abs_tile_y, abs_tile_z);
                     let tile_value = test_tile_p.get_tile_value(tile_map);
                     if !is_tile_value_empty(tile_value) {
                         let min_corner = -0.5
@@ -487,18 +501,63 @@ fn move_player(game_state: &mut GameState, entity: &mut Entity, dt: f32, mut ddp
                         let rel_old_player_p = subtract(tile_map, old_player_p, test_tile_p);
                         let rel = rel_old_player_p.dxy;
 
-                        test_wall(min_corner.x, rel.x, rel.y, player_delta.x, player_delta.y, &mut t_min, min_corner.y, max_corner.y);
-                        test_wall(max_corner.x, rel.x, rel.y, player_delta.x, player_delta.y, &mut t_min, min_corner.y, max_corner.y);
-                        test_wall(min_corner.y, rel.y, rel.x, player_delta.y, player_delta.x, &mut t_min, min_corner.x, max_corner.x);
-                        test_wall(max_corner.y, rel.y, rel.x, player_delta.y, player_delta.x, &mut t_min, min_corner.x, max_corner.x);
+                        test_wall(
+                            min_corner.x,
+                            rel.x,
+                            rel.y,
+                            player_delta.x,
+                            player_delta.y,
+                            &mut t_min,
+                            min_corner.y,
+                            max_corner.y,
+                        );
+                        test_wall(
+                            max_corner.x,
+                            rel.x,
+                            rel.y,
+                            player_delta.x,
+                            player_delta.y,
+                            &mut t_min,
+                            min_corner.y,
+                            max_corner.y,
+                        );
+                        test_wall(
+                            min_corner.y,
+                            rel.y,
+                            rel.x,
+                            player_delta.y,
+                            player_delta.x,
+                            &mut t_min,
+                            min_corner.x,
+                            max_corner.x,
+                        );
+                        test_wall(
+                            max_corner.y,
+                            rel.y,
+                            rel.x,
+                            player_delta.y,
+                            player_delta.x,
+                            &mut t_min,
+                            min_corner.x,
+                            max_corner.x,
+                        );
                     }
+
+                    if abs_tile_x == end_tile_x {
+                        break;
+                    } else {
+                        abs_tile_x = abs_tile_x.wrapping_add_signed(delta_x);
+                    }
+                }
+
+                if abs_tile_y == end_tile_y {
+                    break;
+                } else {
+                    abs_tile_y = abs_tile_y.wrapping_add_signed(delta_y);
                 }
             }
 
-            new_player_p = old_player_p;
-            new_player_p.offset += t_min * player_delta;
-            new_player_p = recanonicalize_position(tile_map, new_player_p);
-            entity.p = new_player_p;
+            entity.p = old_player_p.offset(tile_map, t_min * player_delta);
         }
     }
 
@@ -670,8 +729,16 @@ extern "C" fn game_update_and_render(
         let mut random_number_index = 0;
         let tiles_per_width = 17u32;
         let tiles_per_height = 9u32;
-        let mut screen_x = 0u32;
-        let mut screen_y = 0u32;
+        cfg_select! {
+            false => {
+                let mut screen_x = i32::MAX / 2 as u32;
+                let mut screen_y = i32::MAX / 2 as u32;
+            }
+            true => {
+                let mut screen_x = 0;
+                let mut screen_y = 0;
+            }
+        }
         let mut abs_tile_z = 0u32;
 
         let mut door_left = false;
@@ -890,9 +957,9 @@ extern "C" fn game_update_and_render(
                     y: 0.5 * tile_side_in_pixels as f32,
                 };
                 let cen = V2 {
-                    x: screen_center_x - meters_to_pixels * game_state.camera_p.offset.x
+                    x: screen_center_x - meters_to_pixels * game_state.camera_p.offset_.x
                         + rel_column as f32 * tile_side_in_pixels as f32,
-                    y: screen_center_y + meters_to_pixels * game_state.camera_p.offset.y
+                    y: screen_center_y + meters_to_pixels * game_state.camera_p.offset_.y
                         - rel_row as f32 * tile_side_in_pixels as f32,
                 };
                 let min = cen - 0.9 * tile_side;

@@ -12,7 +12,7 @@ pub struct TileMapPosition {
     pub abs_tile_y: u32,
     pub abs_tile_z: u32,
 
-    pub offset: V2,
+    pub offset_: V2,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -218,8 +218,8 @@ fn recanonicalize_coord(tile_map: &TileMap, tile: &mut u32, tile_rel: &mut f32) 
 pub fn recanonicalize_position(tile_map: &TileMap, pos: TileMapPosition) -> TileMapPosition {
     let mut result = pos;
 
-    recanonicalize_coord(tile_map, &mut result.abs_tile_x, &mut result.offset.x);
-    recanonicalize_coord(tile_map, &mut result.abs_tile_y, &mut result.offset.y);
+    recanonicalize_coord(tile_map, &mut result.abs_tile_x, &mut result.offset_.x);
+    recanonicalize_coord(tile_map, &mut result.abs_tile_y, &mut result.offset_.y);
 
     result
 }
@@ -241,7 +241,7 @@ pub fn subtract(tile_map: &TileMap, a: TileMapPosition, b: TileMapPosition) -> T
     };
     let dtile_z = a.abs_tile_z.wrapping_sub(b.abs_tile_z) as i32 as f32;
 
-    result.dxy = tile_map.tile_side_in_meters * dtile_xy + (a.offset - b.offset);
+    result.dxy = tile_map.tile_side_in_meters * dtile_xy + (a.offset_ - b.offset_);
     result.dz = tile_map.tile_side_in_meters * dtile_z + 0.0;
 
     result
@@ -255,4 +255,15 @@ pub fn centered_tile_point(abs_tile_x: u32, abs_tile_y: u32, abs_tile_z: u32) ->
     result.abs_tile_z = abs_tile_z;
 
     result
+}
+
+impl TileMapPosition {
+    pub fn offset(&self, tile_map: &TileMap, offset: V2) -> TileMapPosition {
+        let mut p = self.clone();
+
+        p.offset_ += offset;
+        p = recanonicalize_position(tile_map, p);
+
+        p
+    }
 }

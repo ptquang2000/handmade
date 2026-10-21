@@ -1,3 +1,9 @@
+pub fn sign_of(value: i32) -> i32 {
+    let result = if value >= 0 { 1 } else { -1 };
+
+    result
+}
+
 pub fn square_root(float32: f32) -> f32 {
     let result = float32.sqrt();
 
