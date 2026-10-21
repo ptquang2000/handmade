@@ -1,3 +1,9 @@
+pub fn square_root(float32: f32) -> f32 {
+    let result = float32.sqrt();
+
+    result
+}
+
 pub fn absolute_value(float32: f32) -> f32 {
     let result = float32.abs() as f32;
     result

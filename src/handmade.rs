@@ -375,8 +375,9 @@ fn move_player(game_state: &mut GameState, entity: &mut Entity, dt: f32, mut ddp
             .as_ref_unchecked()
     };
 
-    if ddp.x != 0. && ddp.y != 0. {
-        ddp *= std::f32::consts::FRAC_1_SQRT_2;
+    let ddp_length = ddp.length_sq();
+    if ddp_length > 1.0 {
+        ddp *= 1.0 / square_root(ddp_length);
     }
 
     let mut player_speed = 50.0;
@@ -390,83 +391,81 @@ fn move_player(game_state: &mut GameState, entity: &mut Entity, dt: f32, mut ddp
     new_player_p.offset += player_delta;
     entity.dp = ddp * dt + entity.dp;
     new_player_p = recanonicalize_position(tile_map, new_player_p);
-    #[cfg(all())]
-    {
-        let mut player_left = new_player_p;
-        player_left.offset.x -= 0.5 * entity.width;
-        player_left = recanonicalize_position(tile_map, player_left);
+    cfg_select! {
+        true => {
+            let mut player_left = new_player_p;
+            player_left.offset.x -= 0.5 * entity.width;
+            player_left = recanonicalize_position(tile_map, player_left);
 
-        let mut player_right = new_player_p;
-        player_right.offset.x += 0.5 * entity.width;
-        player_right = recanonicalize_position(tile_map, player_right);
+            let mut player_right = new_player_p;
+            player_right.offset.x += 0.5 * entity.width;
+            player_right = recanonicalize_position(tile_map, player_right);
 
-        let mut collided = false;
-        let mut col_p = TileMapPosition::default();
-        if !is_tile_map_point_empty(tile_map, new_player_p) {
-            col_p = new_player_p;
-            collided = true;
-        }
-        if !is_tile_map_point_empty(tile_map, player_left) {
-            col_p = player_left;
-            collided = true;
-        }
-        if !is_tile_map_point_empty(tile_map, player_right) {
-            col_p = player_right;
-            collided = true;
-        }
-
-        if collided {
-            let mut r = V2::default();
-            if col_p.abs_tile_x < entity.p.abs_tile_x {
-                r = V2 { x: 1., y: 0. };
+            let mut collided = false;
+            let mut col_p = TileMapPosition::default();
+            if !is_tile_map_point_empty(tile_map, new_player_p) {
+                col_p = new_player_p;
+                collided = true;
             }
-            if col_p.abs_tile_x > entity.p.abs_tile_x {
-                r = V2 { x: -1., y: 0. };
+            if !is_tile_map_point_empty(tile_map, player_left) {
+                col_p = player_left;
+                collided = true;
             }
-            if col_p.abs_tile_y < entity.p.abs_tile_y {
-                r = V2 { x: 0., y: 1. };
-            }
-            if col_p.abs_tile_y > entity.p.abs_tile_y {
-                r = V2 { x: 0., y: -1. };
+            if !is_tile_map_point_empty(tile_map, player_right) {
+                col_p = player_right;
+                collided = true;
             }
 
-            entity.dp = entity.dp - 1. * entity.dp.inner(r) * r;
-        } else {
-            entity.p = new_player_p;
-        }
-    }
-    #[cfg(any())]
-    {
-        let min_tile_x = 0u32;
-        let min_tile_y = 0u32;
-        let one_past_max_tile_x = 0u32;
-        let one_past_max_tile_y = 0u32;
-        let abs_tile_z = 0;
-        let mut best_player_p = entity.p;
-        let best_distance_sq = player_delta.length_sq();
-        for abs_tile_y in min_tile_y..one_past_max_tile_y {
-            for abs_tile_x in min_tile_x..one_past_max_tile_x {
-                let test_tile_p = centered_tile_point(abs_tile_x, abs_tile_y, abs_tile_z);
-                let tile_value = test_tile_p.get_tile_value(tile_map);
-                if is_tile_value_empty(tile_value) {
-                    let min_corner = -0.5
-                        * V2 {
-                            x: tile_map.tile_side_in_meters,
-                            y: tile_map.tile_side_in_meters,
-                        };
-                    let max_corner = 0.5
-                        * V2 {
-                            x: tile_map.tile_side_in_meters,
-                            y: tile_map.tile_side_in_meters,
-                        };
+            if collided {
+                let mut r = V2::default();
+                if col_p.abs_tile_x < entity.p.abs_tile_x {
+                    r = V2 { x: 1., y: 0. };
+                }
+                if col_p.abs_tile_x > entity.p.abs_tile_x {
+                    r = V2 { x: -1., y: 0. };
+                }
+                if col_p.abs_tile_y < entity.p.abs_tile_y {
+                    r = V2 { x: 0., y: 1. };
+                }
+                if col_p.abs_tile_y > entity.p.abs_tile_y {
+                    r = V2 { x: 0., y: -1. };
+                }
 
-                    let rel_new_player_p = subtract(tile_map, test_tile_p, new_player_p);
-                    let test_p =
-                        closest_point_in_rectangle(min_corner, max_corner, rel_new_player_p);
-                    let test_distance_sq = test_p.offset.length_sq();
-                    if best_distance_sq > test_distance_sq {
-                        best_player_p = test_p;
-                        best_distance_sq = test_distance_sq;
+                entity.dp = entity.dp - 1. * entity.dp.inner(r) * r;
+            } else {
+                entity.p = new_player_p;
+            }
+        }
+        _ => {
+            let min_tile_x = old_player_p.abs_tile_x.min(new_player_p.abs_tile_x);
+            let min_tile_y = old_player_p.abs_tile_y.min(new_player_p.abs_tile_y);
+            let one_past_max_tile_x = old_player_p.abs_tile_x.max(new_player_p.abs_tile_x) + 1;
+            let one_past_max_tile_y = old_player_p.abs_tile_y.max(new_player_p.abs_tile_y) + 1;
+
+            let abs_tile_z = entity.p.abs_tile_z;
+            let t_min = 1.0;
+            for abs_tile_y in min_tile_y..one_past_max_tile_y {
+                for abs_tile_x in min_tile_x..one_past_max_tile_x {
+                    let test_tile_p =
+                        centered_tile_point(abs_tile_x as u32, abs_tile_y as u32, abs_tile_z as u32);
+                    let tile_value = test_tile_p.get_tile_value(tile_map);
+                    if is_tile_value_empty(tile_value) {
+                        let min_corner = -0.5
+                            * V2 {
+                                x: tile_map.tile_side_in_meters,
+                                y: tile_map.tile_side_in_meters,
+                            };
+                        let max_corner = 0.5
+                            * V2 {
+                                x: tile_map.tile_side_in_meters,
+                                y: tile_map.tile_side_in_meters,
+                            };
+
+                        let rel_new_player_p = subtract(tile_map, test_tile_p, new_player_p);
+                        let rel = rel_new_player_p.dxy;
+
+                        let t_result = (wall_x - rel.x) / player_delta.x;
+                        test_wall(min_corner, max_corner, rel.y);
                     }
                 }
             }
@@ -948,13 +947,15 @@ fn game_output_sound(game_state: &mut GameState, sound_buffer: &GameSoundBuffer,
         .samples()
         .chunks_exact_mut(sound_buffer.bytes_per_sample as usize)
     {
-        #[cfg(any())]
-        let sample_value = {
-            let sine_value = game_state.t_sine.sin();
-            ((sine_value * tone_volume) as i16).to_be_bytes()
+        cfg_select! {
+            false => {
+                let sine_value = game_state.t_sine.sin();
+                let sample_value = ((sine_value * tone_volume) as i16).to_be_bytes();
+            }
+            _ => {
+                let sample_value = (0 as i16).to_be_bytes();
+            }
         };
-        #[cfg(all())]
-        let sample_value = (0 as i16).to_be_bytes();
 
         for sample_per_channel in sample.chunks_exact_mut(sample_value.len()) {
             sample_per_channel.copy_from_slice(&sample_value);
