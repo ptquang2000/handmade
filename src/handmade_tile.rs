@@ -8,9 +8,9 @@ pub struct TileMapDifference {
 
 #[derive(Default, Clone, Copy)]
 pub struct TileMapPosition {
-    pub abs_tile_x: i32,
-    pub abs_tile_y: i32,
-    pub abs_tile_z: i32,
+    pub abs_tile_x: u32,
+    pub abs_tile_y: u32,
+    pub abs_tile_z: u32,
 
     pub offset: V2,
 }
@@ -154,12 +154,8 @@ pub fn get_tile_value(
 
 impl TileMapPosition {
     pub fn get_tile_value(&self, tile_map: &TileMap) -> u32 {
-        let tile_chunk_value = get_tile_value(
-            tile_map,
-            self.abs_tile_x as u32,
-            self.abs_tile_y as u32,
-            self.abs_tile_z as u32,
-        );
+        let tile_chunk_value =
+            get_tile_value(tile_map, self.abs_tile_x, self.abs_tile_y, self.abs_tile_z);
         tile_chunk_value
     }
 }
@@ -171,12 +167,7 @@ pub fn is_tile_value_empty(tile_value: u32) -> bool {
 }
 
 pub fn is_tile_map_point_empty(tile_map: &TileMap, pos: TileMapPosition) -> bool {
-    let tile_chunk_value = get_tile_value(
-        tile_map,
-        pos.abs_tile_x as u32,
-        pos.abs_tile_y as u32,
-        pos.abs_tile_z as u32,
-    );
+    let tile_chunk_value = get_tile_value(tile_map, pos.abs_tile_x, pos.abs_tile_y, pos.abs_tile_z);
     let empty = (tile_chunk_value == 1) || (tile_chunk_value == 3) || (tile_chunk_value == 4);
 
     empty
@@ -215,9 +206,9 @@ pub fn set_tile_value(
     );
 }
 
-fn recanonicalize_coord(tile_map: &TileMap, tile: &mut i32, tile_rel: &mut f32) {
+fn recanonicalize_coord(tile_map: &TileMap, tile: &mut u32, tile_rel: &mut f32) {
     let offset = round_f32_to_i32(*tile_rel / tile_map.tile_side_in_meters as f32);
-    *tile += offset;
+    *tile = tile.wrapping_add(offset as u32);
     *tile_rel -= offset as f32 * tile_map.tile_side_in_meters;
 
     debug_assert!(*tile_rel >= -0.5 * tile_map.tile_side_in_meters);
@@ -245,13 +236,13 @@ pub fn subtract(tile_map: &TileMap, a: TileMapPosition, b: TileMapPosition) -> T
     let mut result = TileMapDifference::default();
 
     let dtile_xy = V2 {
-        x: (a.abs_tile_x - b.abs_tile_x) as f32,
-        y: (a.abs_tile_y - b.abs_tile_y) as f32,
+        x: (a.abs_tile_x.wrapping_sub(b.abs_tile_x) as i32) as f32,
+        y: (a.abs_tile_y.wrapping_sub(b.abs_tile_y) as i32) as f32,
     };
-    let dtile_z = a.abs_tile_z - b.abs_tile_z;
+    let dtile_z = a.abs_tile_z.wrapping_sub(b.abs_tile_z) as i32 as f32;
 
     result.dxy = tile_map.tile_side_in_meters * dtile_xy + (a.offset - b.offset);
-    result.dz = tile_map.tile_side_in_meters * dtile_z as f32 + 0.0;
+    result.dz = tile_map.tile_side_in_meters * dtile_z + 0.0;
 
     result
 }
@@ -259,9 +250,9 @@ pub fn subtract(tile_map: &TileMap, a: TileMapPosition, b: TileMapPosition) -> T
 pub fn centered_tile_point(abs_tile_x: u32, abs_tile_y: u32, abs_tile_z: u32) -> TileMapPosition {
     let mut result = TileMapPosition::default();
 
-    result.abs_tile_x = abs_tile_x as i32;
-    result.abs_tile_y = abs_tile_y as i32;
-    result.abs_tile_z = abs_tile_z as i32;
+    result.abs_tile_x = abs_tile_x;
+    result.abs_tile_y = abs_tile_y;
+    result.abs_tile_z = abs_tile_z;
 
     result
 }
