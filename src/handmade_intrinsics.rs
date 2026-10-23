@@ -30,6 +30,11 @@ pub fn floor_f32_to_i32(float32: f32) -> i32 {
     result
 }
 
+pub fn ceil_f32_to_i32(float32: f32) -> i32 {
+    let result = float32.ceil() as i32;
+    result
+}
+
 pub fn truncate_f32_to_i32(float32: f32) -> i32 {
     let result = float32 as i32;
     result

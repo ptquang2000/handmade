@@ -346,8 +346,8 @@ fn initialize_player(game_state: &mut GameState, entity_index: usize) {
     entity.p.abs_tile_x = 1;
     entity.p.abs_tile_y = 3;
     entity.p.offset_ = V2::default();
-    entity.height = 1.4;
-    entity.width = 0.75 * entity.height;
+    entity.height = 0.5;
+    entity.width = 1.0;
 
     if let None = get_entity(game_state, game_state.camera_following_entity_index) {
         game_state.camera_following_entity_index = entity_index;
@@ -374,17 +374,22 @@ fn test_wall(
     t_min: &mut f32,
     min_y: f32,
     max_y: f32,
-) {
-    let t_epsilon = 0.0001;
+) -> bool {
+    let mut hit = false;
+
+    let t_epsilon = 0.00001;
     if player_delta_x != 0.0 {
         let t_result = (wall_x - rel_x) / player_delta_x;
         let y = rel_y + t_result * player_delta_y;
         if t_result >= 0.0 && *t_min > t_result {
             if y >= min_y && y <= max_y {
                 *t_min = (t_result - t_epsilon).max(0.0);
+                hit = true;
             }
         }
     }
+
+    hit
 }
 
 fn move_player(game_state: &mut GameState, entity: &mut Entity, dt: f32, mut ddp: V2) {
@@ -407,11 +412,12 @@ fn move_player(game_state: &mut GameState, entity: &mut Entity, dt: f32, mut ddp
     ddp += -8.0 * entity.dp;
 
     let old_player_p = entity.p;
-    let player_delta = 0.5 * ddp * square(dt) + entity.dp * dt;
+    let mut player_delta = 0.5 * ddp * square(dt) + entity.dp * dt;
     entity.dp = ddp * dt + entity.dp;
     let mut new_player_p = old_player_p.offset(tile_map, player_delta);
 
-    cfg_select! {
+    // cfg_select! {
+    match true {
         false => {
             let mut player_left = new_player_p;
             player_left.offset_.x -= 0.5 * entity.width;
@@ -457,107 +463,113 @@ fn move_player(game_state: &mut GameState, entity: &mut Entity, dt: f32, mut ddp
             }
         }
         _ => {
-            cfg_select! {
-                false => {
-                    let min_tile_x = old_player_p.abs_tile_x.min(new_player_p.abs_tile_x);
-                    let min_tile_y = old_player_p.abs_tile_y.min(new_player_p.abs_tile_y);
-                    let one_past_max_tile_x =
-                        old_player_p.abs_tile_x.max(new_player_p.abs_tile_x) + 1;
-                    let one_past_max_tile_y =
-                        old_player_p.abs_tile_y.max(new_player_p.abs_tile_y) + 1;
-                }
-                true => {
-                    let start_tile_x = old_player_p.abs_tile_x;
-                    let start_tile_y = old_player_p.abs_tile_x;
-                    let end_tile_x = new_player_p.abs_tile_x;
-                    let end_tile_y = new_player_p.abs_tile_y;
+            let mut min_tile_x = old_player_p.abs_tile_x.min(new_player_p.abs_tile_x);
+            let mut min_tile_y = old_player_p.abs_tile_y.min(new_player_p.abs_tile_y);
+            let mut max_tile_x = old_player_p.abs_tile_x.max(new_player_p.abs_tile_x);
+            let mut max_tile_y = old_player_p.abs_tile_y.max(new_player_p.abs_tile_y);
 
-                    let delta_x = sign_of(end_tile_x as i32 - start_tile_x as i32);
-                    let delta_y = sign_of(end_tile_y as i32 - start_tile_y as i32);
-                }
-            }
+            let entity_tile_width =
+                ceil_f32_to_i32(entity.width / tile_map.tile_side_in_meters) as u32;
+            let entity_tile_height =
+                ceil_f32_to_i32(entity.height / tile_map.tile_side_in_meters) as u32;
+
+            min_tile_x -= entity_tile_width;
+            min_tile_y -= entity_tile_height;
+            max_tile_x += entity_tile_width;
+            max_tile_y += entity_tile_height;
 
             let abs_tile_z = entity.p.abs_tile_z;
-            let mut t_min = 1.0;
 
-            let mut abs_tile_y = start_tile_y;
-            loop {
-                let mut abs_tile_x = start_tile_x;
-                loop {
-                    let test_tile_p = centered_tile_point(abs_tile_x, abs_tile_y, abs_tile_z);
-                    let tile_value = test_tile_p.get_tile_value(tile_map);
-                    if !is_tile_value_empty(tile_value) {
-                        let min_corner = -0.5
-                            * V2 {
-                                x: tile_map.tile_side_in_meters,
-                                y: tile_map.tile_side_in_meters,
-                            };
-                        let max_corner = 0.5
-                            * V2 {
-                                x: tile_map.tile_side_in_meters,
-                                y: tile_map.tile_side_in_meters,
-                            };
-
-                        let rel_old_player_p = subtract(tile_map, old_player_p, test_tile_p);
-                        let rel = rel_old_player_p.dxy;
-
-                        test_wall(
-                            min_corner.x,
-                            rel.x,
-                            rel.y,
-                            player_delta.x,
-                            player_delta.y,
-                            &mut t_min,
-                            min_corner.y,
-                            max_corner.y,
-                        );
-                        test_wall(
-                            max_corner.x,
-                            rel.x,
-                            rel.y,
-                            player_delta.x,
-                            player_delta.y,
-                            &mut t_min,
-                            min_corner.y,
-                            max_corner.y,
-                        );
-                        test_wall(
-                            min_corner.y,
-                            rel.y,
-                            rel.x,
-                            player_delta.y,
-                            player_delta.x,
-                            &mut t_min,
-                            min_corner.x,
-                            max_corner.x,
-                        );
-                        test_wall(
-                            max_corner.y,
-                            rel.y,
-                            rel.x,
-                            player_delta.y,
-                            player_delta.x,
-                            &mut t_min,
-                            min_corner.x,
-                            max_corner.x,
-                        );
-                    }
-
-                    if abs_tile_x == end_tile_x {
-                        break;
-                    } else {
-                        abs_tile_x = abs_tile_x.wrapping_add_signed(delta_x);
-                    }
-                }
-
-                if abs_tile_y == end_tile_y {
+            let mut t_remaining = 1.;
+            for iterator in 0..4 {
+                if t_remaining <= 0.0 {
                     break;
-                } else {
-                    abs_tile_y = abs_tile_y.wrapping_add_signed(delta_y);
                 }
-            }
 
-            entity.p = old_player_p.offset(tile_map, t_min * player_delta);
+                let mut t_min = t_remaining;
+                let mut wall_normal = V2::default();
+
+                debug_assert!((max_tile_x - min_tile_x) < 32);
+                debug_assert!((max_tile_y - min_tile_y) < 32);
+
+                for abs_tile_y in min_tile_y..=max_tile_y {
+                    for abs_tile_x in min_tile_x..=max_tile_x {
+                        let test_tile_p = centered_tile_point(abs_tile_x, abs_tile_y, abs_tile_z);
+                        let tile_value = test_tile_p.get_tile_value(tile_map);
+                        if !is_tile_value_empty(tile_value) {
+                            let diameter_w = tile_map.tile_side_in_meters + entity.width;
+                            let diameter_h = tile_map.tile_side_in_meters + entity.height;
+                            let min_corner = -0.5
+                                * V2 {
+                                    x: diameter_w,
+                                    y: diameter_h,
+                                };
+                            let max_corner = 0.5
+                                * V2 {
+                                    x: diameter_w,
+                                    y: diameter_h,
+                                };
+
+                            let rel_old_player_p = subtract(tile_map, entity.p, test_tile_p);
+                            let rel = rel_old_player_p.dxy;
+
+                            if test_wall(
+                                min_corner.x,
+                                rel.x,
+                                rel.y,
+                                player_delta.x,
+                                player_delta.y,
+                                &mut t_min,
+                                min_corner.y,
+                                max_corner.y,
+                            ) {
+                                wall_normal = V2 { x: -1., y: 0. };
+                            }
+                            if test_wall(
+                                max_corner.x,
+                                rel.x,
+                                rel.y,
+                                player_delta.x,
+                                player_delta.y,
+                                &mut t_min,
+                                min_corner.y,
+                                max_corner.y,
+                            ) {
+                                wall_normal = V2 { x: 1., y: 0. };
+                            }
+                            if test_wall(
+                                min_corner.y,
+                                rel.y,
+                                rel.x,
+                                player_delta.y,
+                                player_delta.x,
+                                &mut t_min,
+                                min_corner.x,
+                                max_corner.x,
+                            ) {
+                                wall_normal = V2 { x: 0., y: -1. };
+                            }
+                            if test_wall(
+                                max_corner.y,
+                                rel.y,
+                                rel.x,
+                                player_delta.y,
+                                player_delta.x,
+                                &mut t_min,
+                                min_corner.x,
+                                max_corner.x,
+                            ) {
+                                wall_normal = V2 { x: 0., y: 1. };
+                            }
+                        }
+                    }
+                }
+
+                entity.p = entity.p.offset(tile_map, t_min * player_delta);
+                entity.dp = entity.dp - 1. * entity.dp.inner(wall_normal) * wall_normal;
+                player_delta = player_delta - 1. * player_delta.inner(wall_normal) * wall_normal;
+                t_remaining -= t_min;
+            }
         }
     }
 
@@ -980,7 +992,7 @@ extern "C" fn game_update_and_render(
             let player_ground_point_y = screen_center_y - diff.dxy.y * meters_to_pixels;
             let player_left_top = V2 {
                 x: player_ground_point_x - 0.5 * meters_to_pixels * entity.width,
-                y: player_ground_point_y - meters_to_pixels * entity.height,
+                y: player_ground_point_y - 0.5 * meters_to_pixels * entity.height,
             };
             let entity_width_height = V2 {
                 x: entity.width,
